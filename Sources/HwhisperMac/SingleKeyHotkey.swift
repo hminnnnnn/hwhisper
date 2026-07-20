@@ -9,8 +9,51 @@ enum HotkeyMode: String, CaseIterable {
     case singleKeyRightCommand
     case singleKeyRightOption
     case singleKeyFn
+    /// A single modifier key the user recorded themselves (any of the
+    /// modifier keys `modifierName(for:)` knows) — stored in
+    /// `customKeyCode`. Lets users pick a single key beyond the three
+    /// presets above (user request), still limited to modifier keys because
+    /// a plain letter/number can't be a global single-key toggle without
+    /// clobbering normal typing.
+    case singleKeyCustom
 
     private static let defaultsKey = "hotkeyMode"
+    private static let customCodeKey = "singleKeyCustomCode"
+
+    /// Key code for `.singleKeyCustom`, recorded via the settings UI.
+    static var customKeyCode: CGKeyCode? {
+        get {
+            let stored = UserDefaults.standard.integer(forKey: customCodeKey)
+            return stored > 0 ? CGKeyCode(stored) : nil
+        }
+        set {
+            if let newValue {
+                UserDefaults.standard.set(Int(newValue), forKey: customCodeKey)
+            } else {
+                UserDefaults.standard.removeObject(forKey: customCodeKey)
+            }
+            // Re-apply the monitor so the new key takes effect immediately.
+            NotificationCenter.default.post(name: .hotkeyModeDidChange, object: nil)
+        }
+    }
+
+    /// Human-readable name + the modifier bit each recordable single key
+    /// sets in `event.modifierFlags`. The single source of truth for which
+    /// keys `.singleKeyCustom` accepts and how the monitor tests down/up.
+    static func modifierInfo(for keyCode: CGKeyCode) -> (name: String, flag: NSEvent.ModifierFlags)? {
+        switch keyCode {
+        case 54: return ("우측 ⌘", .command)
+        case 55: return ("좌측 ⌘", .command)
+        case 61: return ("우측 ⌥", .option)
+        case 58: return ("좌측 ⌥", .option)
+        case 62: return ("우측 ⌃", .control)
+        case 59: return ("좌측 ⌃", .control)
+        case 60: return ("우측 ⇧", .shift)
+        case 56: return ("좌측 ⇧", .shift)
+        case 63: return ("fn (🌐)", .function)
+        default: return nil
+        }
+    }
 
     /// Persisted selection, defaulting to the right-⌘ single-key tap (§4:
     /// fn conflicts with the system default 🌐 action — emoji picker / input
@@ -37,6 +80,7 @@ enum HotkeyMode: String, CaseIterable {
         case .singleKeyRightCommand: return 54
         case .singleKeyRightOption: return 61
         case .singleKeyFn: return 63
+        case .singleKeyCustom: return HotkeyMode.customKeyCode
         }
     }
 
@@ -46,6 +90,11 @@ enum HotkeyMode: String, CaseIterable {
         case .singleKeyRightCommand: return "단일 키: 우측 ⌘"
         case .singleKeyRightOption: return "단일 키: 우측 ⌥"
         case .singleKeyFn: return "단일 키: fn (🌐)"
+        case .singleKeyCustom:
+            if let code = HotkeyMode.customKeyCode, let info = HotkeyMode.modifierInfo(for: code) {
+                return "단일 키: \(info.name)"
+            }
+            return "단일 키: 직접 지정"
         }
     }
 }
@@ -137,15 +186,13 @@ final class SingleKeyHotkeyMonitor {
     }
 
     /// Maps the physical key back to the modifier bit it sets in
-    /// `event.modifierFlags` while held — `.command`/`.option` are shared
-    /// with their left-hand counterpart, but `keyCode` already disambiguates
-    /// which physical key produced the event, so this is only used to test
-    /// down (bit set) vs. up (bit cleared).
+    /// `event.modifierFlags` while held — `.command`/`.option`/etc. are
+    /// shared with the left/right counterpart, but `keyCode` already
+    /// disambiguates which physical key produced the event, so this is only
+    /// used to test down (bit set) vs. up (bit cleared). Delegates to
+    /// `HotkeyMode.modifierInfo` so preset and custom single keys share one
+    /// source of truth; falls back to `.command` for any unknown code.
     private static func flag(for keyCode: CGKeyCode) -> NSEvent.ModifierFlags {
-        switch keyCode {
-        case 63: return .function
-        case 61: return .option
-        default: return .command // 54 (right ⌘)
-        }
+        HotkeyMode.modifierInfo(for: keyCode)?.flag ?? .command
     }
 }

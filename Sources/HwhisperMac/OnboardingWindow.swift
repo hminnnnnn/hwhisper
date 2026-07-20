@@ -273,6 +273,7 @@ private struct OnboardingHotkeyPage: View {
         case .singleKeyRightCommand: "우측 ⌘ 키를 짧게 탭합니다. 조합키(예: 우측⌘+C)는 무시됩니다."
         case .singleKeyRightOption: "우측 ⌥ 키를 짧게 탭합니다."
         case .singleKeyFn: "fn(🌐) 키를 짧게 탭합니다. 시스템 설정에서 fn 키 기본 동작을 바꿔야 충돌하지 않습니다."
+        case .singleKeyCustom: "원하는 보조키(⌘/⌥/⌃/⇧ 좌·우, fn)를 직접 지정합니다 (설정에서 지정)."
         }
     }
 }
