@@ -64,25 +64,104 @@ cp -R dist/Hwhisper.app /Applications/   # 또는 설치 후 Launchpad/Spotlight
 
 `.dmg`를 직접 만들려면 `bash scripts/make-dmg.sh`를 실행하세요(`dist/hwhisper-<버전>.dmg` 생성).
 
-## 빌드하기
+## 단계별 설치 가이드 (AI 도우미용 · 그대로 따라 안내 가능)
 
-터미널을 열 필요 없이 실행할 수 있는 `.app` 번들을 만들려면 저장소 루트에서 다음을 실행합니다.
+> 이 섹션은 사람이 그대로 따라 하거나, AI 도우미(Claude 등)가 사용자에게 한 단계씩 안내하도록 작성되었습니다. 각 단계는 **판단 조건 → 실행 명령 → 확인 방법** 순서입니다. 명령의 출력을 사용자에게 물어 다음 단계를 결정하세요.
+
+### 0단계 — 환경 확인 (설치 경로가 갈립니다)
+
+사용자 터미널에서 다음을 실행하고 출력을 확인합니다.
 
 ```bash
+sw_vers -productVersion   # macOS 버전 (예: 26.0, 15.6, 14.7)
+uname -m                  # arm64 = Apple Silicon, x86_64 = Intel
+```
+
+- **macOS 26 이상 + `arm64`** → Apple 온디바이스 엔진(빠름·고정확). 최적 경로.
+- **macOS 14~15 (또는 `x86_64` Intel)** → 실행은 되지만 WhisperKit 폴백 사용. **최초 1회 모델 다운로드(~600MB)** 와 **첫 받아쓰기 수 분 소요**를 미리 안내하세요.
+- **macOS 14 미만** → 미지원. 업데이트 안내.
+
+### 1단계 — 앱 받기 (둘 중 하나)
+
+**(A) 배포된 .dmg 사용** — 대부분의 사용자:
+
+```bash
+# 다운로드 폴더의 dmg를 마운트하고 앱을 /Applications로 복사 (버전은 실제 파일명에 맞추기)
+hdiutil attach ~/Downloads/hwhisper-0.2.0.dmg
+cp -R "/Volumes/hwhisper 0.2.0/Hwhisper.app" /Applications/
+hdiutil detach "/Volumes/hwhisper 0.2.0"
+```
+
+**(B) 소스 빌드** — 개발자이거나 신뢰를 직접 확인하려는 사용자. 먼저 `xcode-select --install`(CLT)이 되어 있어야 합니다.
+
+```bash
+git clone <저장소 URL> hwhisper && cd hwhisper
 bash scripts/make-app.sh
-```
-
-스크립트는 `swift build -c release`로 릴리스 바이너리를 빌드한 뒤 `dist/Hwhisper.app`을 구성하고 ad-hoc 코드사이닝까지 처리합니다. 완료되면 다음 중 하나로 실행할 수 있습니다.
-
-```bash
-open dist/Hwhisper.app
-```
-
-또는 `/Applications`에 복사해 Launchpad/Spotlight에서 바로 실행할 수 있습니다.
-
-```bash
 cp -R dist/Hwhisper.app /Applications/
 ```
+
+> (B)로 빌드한 앱은 격리 속성이 없어 **2단계를 건너뜁니다.**
+
+### 2단계 — 첫 실행 차단 해제 (dmg 설치 시에만)
+
+이 앱은 공증되지 않아 Gatekeeper가 처음 실행을 막습니다. **한 번만** 아래를 실행하면 됩니다.
+
+```bash
+xattr -dr com.apple.quarantine /Applications/Hwhisper.app
+```
+
+확인: 위 명령이 오류 없이 끝나면 성공입니다. (터미널을 못 쓰는 사용자는 앱 실행 시도 → **시스템 설정 > 개인정보 보호 및 보안** 하단의 "확인 없이 열기" 클릭. macOS 15+에서는 Control-클릭 우회가 막혀 이 경로가 유일합니다.)
+
+### 3단계 — 앱 실행
+
+```bash
+open /Applications/Hwhisper.app
+```
+
+확인: 화면 우상단 **메뉴 막대에 파형(🎙) 아이콘**이 나타나면 실행 성공입니다. Dock에는 아이콘이 없습니다(메뉴 막대 전용 앱). 안 보이면 5단계 문제 해결 참고.
+
+### 4단계 — 권한 부여 + 온보딩
+
+첫 실행 시 온보딩 창이 뜹니다. 안내에 따라 두 권한을 허용하세요. 직접 여는 경로:
+
+- **마이크:** 시스템 설정 > 개인정보 보호 및 보안 > 마이크 → `Hwhisper` 켜기
+- **손쉬운 사용(텍스트 삽입/전역 단축키):** 시스템 설정 > 개인정보 보호 및 보안 > 손쉬운 사용 → `Hwhisper` 켜기
+
+권한 상태는 다음으로 프로그램적으로 확인할 수 있습니다(둘 다 있어야 정상 동작):
+
+```bash
+# 마이크: "Hwhisper" 항목이 보이면 등록된 것
+sqlite3 "$HOME/Library/Application Support/com.apple.TCC/TCC.db" \
+  "SELECT service,auth_value FROM access WHERE client LIKE '%hwhisper%';" 2>/dev/null || \
+  echo "TCC.db 직접 조회 불가 — 시스템 설정 UI로 확인하세요"
+```
+
+권한을 켠 뒤에는 앱을 완전히 종료(메뉴 막대 아이콘 > Quit hwhisper)했다가 다시 실행하면 확실히 반영됩니다.
+
+### 5단계 — 동작 확인
+
+1. 아무 텍스트 입력창(메모, TextEdit 등)에 커서를 둡니다.
+2. **우측 ⌘ 키를 짧게 한 번 탭** → 화면 하단에 "듣는 중…" 표시가 뜹니다.
+3. 한 문장 말한 뒤 **다시 우측 ⌘ 탭** → 잠시 후 커서 위치에 텍스트가 삽입됩니다.
+4. WhisperKit 경로(구형 Mac)라면 첫 회는 "음성 모델 준비 중…"이 뜨고 수 분 걸립니다 — 정상입니다.
+
+로그로 진단(모든 단계가 기록됩니다):
+
+```bash
+tail -20 ~/Library/Logs/Hwhisper.log
+```
+
+`recording started` → `transcribed N chars` → `insertion outcome: inserted` 순으로 찍히면 정상입니다.
+
+### 문제 해결
+
+| 증상 | 원인·조치 |
+|---|---|
+| 실행해도 메뉴 막대에 아이콘이 없음 | 대부분 정상(Dock 아이콘 없음). 우측⌘ 탭이 반응하는지부터 확인. 여전히 없으면 `~/Library/Logs/Hwhisper.log` 확인 |
+| "손상되어 열 수 없음" 경고 | 2단계 `xattr` 미실행. 위 명령 실행 |
+| 우측⌘ 탭 무반응 | 손쉬운 사용/입력 모니터링 권한 미부여. 4단계 재확인 후 앱 재시작. 단축키를 우측⌥/fn/조합키로 바꿔볼 수도 있음(메뉴 > 설정) |
+| 받아쓰기는 되는데 삽입이 안 됨 | 손쉬운 사용 권한 문제. 삽입 실패 시 텍스트는 클립보드에 보존되므로 ⌘V로 붙여넣기 가능 |
+| 정제가 안 됨 | 정제는 선택 사항. 설정에서 켜고 무료 API 키 입력(아래 "텍스트 정제 설정"). 안 켜도 원문은 삽입됨 |
 
 ## 첫 실행 시 권한 부여
 
@@ -184,6 +263,10 @@ macOS 자체 로그인 항목 기능을 사용합니다.
 - **ad-hoc 서명(기본값, 인증서 미생성 시):** `scripts/make-app.sh`는 위 `hwhisper-dev` 인증서가 없으면 개발자 인증서 없이 ad-hoc(`codesign --sign -`)으로 서명합니다. 재빌드할 때마다 앱의 서명 식별자가 바뀌므로, macOS가 마이크/손쉬운 사용 권한을 다시 요청할 수 있습니다. 재빌드 후 권한 다이얼로그가 다시 뜨거나 삽입이 동작하지 않으면 위 "안정적인 코드 서명" 절차를 진행하거나, 권한 설정을 다시 확인하세요.
 - **음성 인식 엔진:** macOS 26+ (Apple Silicon)에서는 Apple `SpeechTranscriber`(온디바이스)를 기본으로 사용합니다. macOS 26 미만에서는 WhisperKit 폴백으로 자동 전환됩니다 — **최초 1회 모델 다운로드(~600MB)**가 필요하고 메모리 사용량이 더 크며, **실행 후 첫 받아쓰기는 모델 로드+최초 CoreML 컴파일 때문에 수 분 걸릴 수 있습니다**(그 이후 같은 실행에서는 빠릅니다). 이 동안 화면에는 "음성 모델 준비 중…" 표시가 뜹니다.
 - **네트워크:** 기본 경로(원문 받아쓰기)는 최초 자산 준비 이후 완전히 오프라인으로 동작합니다. 정제(refinement) 기능을 켜면 사용하는 경로(클라우드 BYOK vs 로컬 LLM)에 따라 네트워크 사용 여부가 달라집니다.
+
+## 배포 (개발자용)
+
+이 앱을 직접 배포하려면 `docs/RELEASING.md`를 참고하세요 — 무료 트랙(self-signed dmg, 지금 가능)과 공증 트랙(D1: Apple Developer ID 서명 → 공증 → 스테이플 → Sparkle 자동 업데이트)의 구체 절차를 담고 있습니다.
 
 ## 라이선스
 

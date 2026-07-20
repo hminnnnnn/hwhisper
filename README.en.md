@@ -64,6 +64,95 @@ cp -R dist/Hwhisper.app /Applications/    # or install and launch from Launchpad
 
 To build a `.dmg` yourself, run `bash scripts/make-dmg.sh` (produces `dist/hwhisper-<version>.dmg`).
 
+## Step-by-step install guide (for an AI assistant to follow)
+
+> This section is written so a person can follow it directly, or an AI assistant (e.g. Claude) can walk a user through it one step at a time. Each step is **decision → command → how to confirm**. Ask the user for command output to decide the next step.
+
+### Step 0 — check the environment (it branches the install path)
+
+Run in the user's terminal and read the output:
+
+```bash
+sw_vers -productVersion   # macOS version (e.g. 26.0, 15.6, 14.7)
+uname -m                  # arm64 = Apple Silicon, x86_64 = Intel
+```
+
+- **macOS 26+ and `arm64`** → Apple on-device engine (fast, accurate). Best path.
+- **macOS 14–15 (or `x86_64` Intel)** → runs, but uses the WhisperKit fallback. Warn up front about the **one-time ~600MB model download** and the **multi-minute first dictation**.
+- **Below macOS 14** → unsupported; advise updating.
+
+### Step 1 — get the app (one of two)
+
+**(A) Released .dmg** — most users:
+
+```bash
+hdiutil attach ~/Downloads/hwhisper-0.2.0.dmg
+cp -R "/Volumes/hwhisper 0.2.0/Hwhisper.app" /Applications/
+hdiutil detach "/Volumes/hwhisper 0.2.0"
+```
+
+**(B) Build from source** — developers, or to verify trust yourself. Requires `xcode-select --install` (CLT):
+
+```bash
+git clone <repo URL> hwhisper && cd hwhisper
+bash scripts/make-app.sh
+cp -R dist/Hwhisper.app /Applications/
+```
+
+> A source-built app has no quarantine attribute, so it **skips Step 2.**
+
+### Step 2 — clear the first-launch block (dmg installs only)
+
+The app isn't notarized, so Gatekeeper blocks the first launch. Run this **once**:
+
+```bash
+xattr -dr com.apple.quarantine /Applications/Hwhisper.app
+```
+
+Confirm: success if the command returns with no error. (Users who can't use the terminal: try to open the app → **System Settings > Privacy & Security** → "Open Anyway". Since macOS 15 this is the only route — the old Control-click bypass is gone.)
+
+### Step 3 — launch
+
+```bash
+open /Applications/Hwhisper.app
+```
+
+Confirm: a **waveform (🎙) icon appears in the menu bar** (top-right). There is no Dock icon (menu-bar-only app). If nothing appears, see Troubleshooting.
+
+### Step 4 — grant permissions + onboarding
+
+A setup wizard appears on first launch. Grant both permissions; direct paths:
+
+- **Microphone:** System Settings > Privacy & Security > Microphone → enable `Hwhisper`
+- **Accessibility (text insertion / global hotkey):** System Settings > Privacy & Security > Accessibility → enable `Hwhisper`
+
+After enabling, fully quit (menu-bar icon > Quit hwhisper) and relaunch to be sure it takes effect.
+
+### Step 5 — verify it works
+
+1. Put the cursor in any text field (Notes, TextEdit, etc.).
+2. **Tap Right-⌘ once** → a "listening…" pill appears at the bottom of the screen.
+3. Say a sentence, then **tap Right-⌘ again** → the text is inserted at the cursor shortly after.
+4. On the WhisperKit path (older Macs), the first run shows "preparing model…" for a few minutes — that's expected.
+
+Diagnose via the log (every step is recorded):
+
+```bash
+tail -20 ~/Library/Logs/Hwhisper.log
+```
+
+`recording started` → `transcribed N chars` → `insertion outcome: inserted` means it's working.
+
+### Troubleshooting
+
+| Symptom | Cause / fix |
+|---|---|
+| No menu-bar icon after launch | Usually fine (no Dock icon). Check whether Right-⌘ responds; if still nothing, check `~/Library/Logs/Hwhisper.log` |
+| "damaged and can't be opened" | Step 2 `xattr` wasn't run — run it |
+| Right-⌘ tap does nothing | Missing Accessibility/Input Monitoring permission. Re-check Step 4, relaunch. You can also switch the hotkey to Right-⌥/fn/combo (menu > Settings) |
+| Transcribes but doesn't insert | Accessibility permission issue. On insertion failure the text is preserved to the clipboard — paste with ⌘V |
+| No refinement | Refinement is optional. Enable it in Settings and add a free API key. Raw text is inserted regardless |
+
 ## Granting permissions on first launch
 
 hwhisper needs microphone access and the Accessibility permission (to type text into other apps). On first launch a setup wizard walks you through these; you can also grant them directly:
