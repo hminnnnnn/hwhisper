@@ -123,6 +123,8 @@ xattr -dr com.apple.quarantine /Applications/Hwhisper.app
 
 Confirm: success if the command returns with no error. (Users who can't use the terminal: try to open the app → **System Settings > Privacy & Security** → "Open Anyway". Since macOS 15 this is the only route — the old Control-click bypass is gone.)
 
+> If `xattr` prints `Permission denied` (a known v0.2.0 issue, fixed in v0.2.1), prefix it with `sudo`: `sudo xattr -dr com.apple.quarantine /Applications/Hwhisper.app`. That error only hits a few non-essential files, and the app's own quarantine is usually already cleared, so it often just launches anyway.
+
 ### Step 3 — launch
 
 ```bash

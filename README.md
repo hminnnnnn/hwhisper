@@ -124,6 +124,8 @@ xattr -dr com.apple.quarantine /Applications/Hwhisper.app
 
 확인: 위 명령이 오류 없이 끝나면 성공입니다. (터미널을 못 쓰는 사용자는 앱 실행 시도 → **시스템 설정 > 개인정보 보호 및 보안** 하단의 "확인 없이 열기" 클릭. macOS 15+에서는 Control-클릭 우회가 막혀 이 경로가 유일합니다.)
 
+> `xattr`에서 `Permission denied`가 뜬다면(v0.2.0의 알려진 문제 — v0.2.1에서 수정됨) 앞에 `sudo`를 붙여 실행하세요: `sudo xattr -dr com.apple.quarantine /Applications/Hwhisper.app`. 참고로 그 오류는 일부 비핵심 파일에만 발생하며, 앱 자체 격리는 이미 해제된 경우가 많아 그냥 실행되기도 합니다.
+
 ### 3단계 — 앱 실행
 
 ```bash

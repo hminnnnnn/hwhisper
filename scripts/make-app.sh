@@ -16,7 +16,7 @@ cd "$ROOT_DIR"
 
 APP_NAME="Hwhisper"
 BUNDLE_ID="com.hminn.hwhisper"
-BUNDLE_VERSION="0.2.0"
+BUNDLE_VERSION="0.2.1"
 DIST_DIR="$ROOT_DIR/dist"
 APP_DIR="$DIST_DIR/$APP_NAME.app"
 CONTENTS_DIR="$APP_DIR/Contents"
@@ -97,6 +97,14 @@ if [[ -d "$KS_BUNDLE" ]]; then
 else
     echo "warning: KeyboardShortcuts resource bundle not found at $KS_BUNDLE (Recorder UI may fall back to unlocalized text)" >&2
 fi
+
+# The KeyboardShortcuts SwiftPM resource bundle ships some files read-only
+# (0444). They survive into the .dmg, and on the user's machine
+# `xattr -dr com.apple.quarantine` then fails with EACCES on exactly those
+# files (removing an extended attribute needs write permission). Give the
+# owner write access so the documented one-line first-launch command works
+# without sudo. Done BEFORE codesign so the signature covers final state.
+chmod -R u+w "$APP_DIR"
 
 echo "==> Code signing"
 # Prefer a stable "hwhisper-dev" self-signed identity (see
