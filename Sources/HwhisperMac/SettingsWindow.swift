@@ -64,7 +64,7 @@ struct SettingsView: View {
                     case .singleKeyRightCommand, .singleKeyRightOption:
                         Text("선택한 키를 짧게 한 번 탭하면 녹음이 시작/종료됩니다. 다른 키와 함께 누르면(조합, 예: 우측⌘+C) 무시되어 원래 동작을 방해하지 않습니다. 최초 사용 시 '입력 모니터링' 권한 요청이 뜰 수 있습니다.")
                     case .singleKeyCustom:
-                        Text("원하는 보조키(⌘/⌥/⌃/⇧ 좌·우, fn)를 직접 지정합니다. 지정한 키를 짧게 한 번 탭하면 녹음이 시작/종료되고, 다른 키와 함께 누르면 무시됩니다. 일반 문자·숫자키는 타이핑과 충돌해 지원하지 않습니다.")
+                        Text("원하는 키를 직접 지정합니다 — 보조키(⌘/⌥/⌃/⇧ 좌·우, fn)와 함수키(F1~F20, 외장 키보드의 F13~F19 포함)를 쓸 수 있습니다. 일반 문자·숫자·방향키·Return 등은 타이핑/이동과 충돌해 지원하지 않습니다(선택 시 안내가 표시됩니다). 지정한 키를 짧게 탭하면 녹음이 시작/종료됩니다.")
                     }
                 }
                 .font(.footnote)
@@ -280,38 +280,45 @@ private struct ShortcutRecorderRow: View {
 private struct SingleKeyRecorderRow: View {
     @State private var isRecording = false
     @State private var display: String = SingleKeyRecorderRow.currentName()
+    @State private var errorMessage: String?
     @State private var monitor: Any?
 
     private static func currentName() -> String {
-        if let code = HotkeyMode.customKeyCode, let info = HotkeyMode.modifierInfo(for: code) {
-            return info.name
-        }
+        if let code = HotkeyMode.customKeyCode { return HotkeyMode.keyDisplayName(for: code) }
         return "지정되지 않음"
     }
 
     var body: some View {
-        HStack {
-            Text("단일 키:")
-            Spacer()
-            Button {
-                isRecording ? stopRecording() : startRecording()
-            } label: {
-                Text(isRecording ? "보조키를 누르세요… (Esc 취소)" : display)
-                    .frame(minWidth: 150)
-                    .padding(.vertical, 3)
-                    .padding(.horizontal, 8)
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 6)
-                            .strokeBorder(isRecording ? Brand.accent : Color.secondary.opacity(0.4))
-                    )
-                    .foregroundStyle(isRecording ? Brand.accent : .primary)
+        VStack(alignment: .leading, spacing: 4) {
+            HStack {
+                Text("단일 키:")
+                Spacer()
+                Button {
+                    isRecording ? stopRecording() : startRecording()
+                } label: {
+                    Text(isRecording ? "키를 누르세요… (Esc 취소)" : display)
+                        .frame(minWidth: 150)
+                        .padding(.vertical, 3)
+                        .padding(.horizontal, 8)
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 6)
+                                .strokeBorder(isRecording ? Brand.accent : Color.secondary.opacity(0.4))
+                        )
+                        .foregroundStyle(isRecording ? Brand.accent : .primary)
+                }
+                .buttonStyle(.plain)
             }
-            .buttonStyle(.plain)
+            if let errorMessage {
+                Text(errorMessage)
+                    .font(.footnote)
+                    .foregroundStyle(.red)
+            }
         }
         .onDisappear { stopRecording() }
     }
 
     private func startRecording() {
+        errorMessage = nil
         isRecording = true
         monitor = NSEvent.addLocalMonitorForEvents(matching: [.flagsChanged, .keyDown]) { event in
             MainActor.assumeIsolated { handle(event) }
@@ -325,20 +332,34 @@ private struct SingleKeyRecorderRow: View {
         isRecording = false
     }
 
+    private func assign(_ code: CGKeyCode) {
+        HotkeyMode.customKeyCode = code
+        display = HotkeyMode.keyDisplayName(for: code)
+        errorMessage = nil
+        stopRecording()
+    }
+
     private func handle(_ event: NSEvent) {
-        if event.type == .keyDown {
-            if event.keyCode == 53 { stopRecording() } // Esc cancels
-            else { NSSound.beep() }                     // non-modifier: not allowed
+        if event.type == .flagsChanged {
+            // Modifier key: accept on press (its flag bit set), ignore release.
+            let code = CGKeyCode(event.keyCode)
+            guard let info = HotkeyMode.modifierInfo(for: code) else { return }
+            guard event.modifierFlags.contains(info.flag) else { return }
+            assign(code)
             return
         }
-        // flagsChanged: only accept known modifier keys, and only on the
-        // press (its flag bit is set), never the release.
-        let code = CGKeyCode(event.keyCode)
-        guard let info = HotkeyMode.modifierInfo(for: code) else { return }
-        guard event.modifierFlags.contains(info.flag) else { return }
-        HotkeyMode.customKeyCode = code
-        display = info.name
-        stopRecording()
+
+        // keyDown (non-modifier)
+        if event.keyCode == 53 { stopRecording(); return } // Esc cancels
+        if HotkeyMode.isAssignableKeyDown(event) {
+            assign(CGKeyCode(event.keyCode))
+        } else {
+            // Regular letter/number, or a navigation/edit key — can't be a
+            // global single-key toggle. Stay in recording mode so the user
+            // can try another key; show the red one-line notice.
+            errorMessage = "해당 키는 설정이 불가능합니다."
+            NSSound.beep()
+        }
     }
 }
 

@@ -37,9 +37,11 @@ enum HotkeyMode: String, CaseIterable {
         }
     }
 
-    /// Human-readable name + the modifier bit each recordable single key
+    /// Human-readable name + the modifier bit each recordable modifier key
     /// sets in `event.modifierFlags`. The single source of truth for which
-    /// keys `.singleKeyCustom` accepts and how the monitor tests down/up.
+    /// modifier keys `.singleKeyCustom` accepts and how the monitor tests
+    /// down/up. (Non-modifier keys like function keys are handled by
+    /// `functionKeyName`/`isAssignableKeyDown` and the monitor's keyDown path.)
     static func modifierInfo(for keyCode: CGKeyCode) -> (name: String, flag: NSEvent.ModifierFlags)? {
         switch keyCode {
         case 54: return ("우측 ⌘", .command)
@@ -53,6 +55,53 @@ enum HotkeyMode: String, CaseIterable {
         case 63: return ("fn (🌐)", .function)
         default: return nil
         }
+    }
+
+    /// Standard Mac key codes for F1–F20 → display name. These reach apps as
+    /// `keyDown` (unlike modifiers) and produce no text, so they're safe as a
+    /// single-key toggle — especially F13–F19 on external keyboards.
+    static func functionKeyName(for keyCode: CGKeyCode) -> String? {
+        let map: [CGKeyCode: String] = [
+            122: "F1", 120: "F2", 99: "F3", 118: "F4", 96: "F5", 97: "F6",
+            98: "F7", 100: "F8", 101: "F9", 109: "F10", 103: "F11", 111: "F12",
+            105: "F13", 107: "F14", 113: "F15", 106: "F16", 64: "F17", 79: "F18",
+            80: "F19", 90: "F20",
+        ]
+        return map[keyCode]
+    }
+
+    /// Display name for any assignable single key (modifier or function key).
+    static func keyDisplayName(for keyCode: CGKeyCode) -> String {
+        modifierInfo(for: keyCode)?.name ?? functionKeyName(for: keyCode) ?? "키 \(keyCode)"
+    }
+
+    /// Navigation/edit keys that reach apps via `keyDown` but must never be a
+    /// global single-key toggle — using them would fire dictation AND their
+    /// normal action (move cursor, delete, confirm…) everywhere.
+    private static let disallowedKeyCodes: Set<CGKeyCode> = [
+        36, 76,             // Return / Enter
+        48,                 // Tab
+        49,                 // Space
+        51,                 // Delete (backspace)
+        53,                 // Escape
+        117,                // Forward Delete
+        115, 119, 116, 121, // Home, End, Page Up, Page Down
+        123, 124, 125, 126, // arrow keys
+        114,                // Help / Insert
+    ]
+
+    /// Whether a non-modifier `keyDown` can be assigned as a single-key
+    /// toggle: not a nav/edit key, and not a text-producing key. Text keys
+    /// (letters/digits/punctuation/space and the control chars for
+    /// Return/Tab/Esc/Delete) yield a scalar below the function-key private
+    /// range (< 0xF700); function keys and other non-text keys are at or
+    /// above it (or produce no character at all).
+    static func isAssignableKeyDown(_ event: NSEvent) -> Bool {
+        if disallowedKeyCodes.contains(CGKeyCode(event.keyCode)) { return false }
+        guard let scalar = event.charactersIgnoringModifiers?.unicodeScalars.first else {
+            return true // no character (some special keys) → allow
+        }
+        return scalar.value >= 0xF700
     }
 
     /// Persisted selection, defaulting to the right-⌘ single-key tap (§4:
@@ -91,8 +140,8 @@ enum HotkeyMode: String, CaseIterable {
         case .singleKeyRightOption: return "단일 키: 우측 ⌥"
         case .singleKeyFn: return "단일 키: fn (🌐)"
         case .singleKeyCustom:
-            if let code = HotkeyMode.customKeyCode, let info = HotkeyMode.modifierInfo(for: code) {
-                return "단일 키: \(info.name)"
+            if let code = HotkeyMode.customKeyCode {
+                return "단일 키: \(HotkeyMode.keyDisplayName(for: code))"
             }
             return "단일 키: 직접 지정"
         }
@@ -134,16 +183,32 @@ final class SingleKeyHotkeyMonitor {
         guard let keyCode = mode.singleKeyCode else { return }
         targetKeyCode = keyCode
 
-        flagsMonitor = NSEvent.addGlobalMonitorForEvents(matching: .flagsChanged) { [weak self] event in
-            Task { @MainActor in self?.handleFlagsChanged(event) }
-        }
-        // Any other keyboard/mouse input between the target key's down and
-        // up disqualifies the tap — this is what keeps e.g. right-⌘+C
-        // (copy) from also triggering dictation.
-        interruptMonitor = NSEvent.addGlobalMonitorForEvents(
-            matching: [.keyDown, .leftMouseDown, .rightMouseDown, .otherMouseDown, .scrollWheel]
-        ) { [weak self] _ in
-            Task { @MainActor in self?.interrupted = true }
+        if HotkeyMode.modifierInfo(for: keyCode) != nil {
+            // Modifier key: detect a clean solo tap via flagsChanged.
+            flagsMonitor = NSEvent.addGlobalMonitorForEvents(matching: .flagsChanged) { [weak self] event in
+                Task { @MainActor in self?.handleFlagsChanged(event) }
+            }
+            // Any other keyboard/mouse input between the target key's down
+            // and up disqualifies the tap — this is what keeps e.g. right-⌘+C
+            // (copy) from also triggering dictation.
+            interruptMonitor = NSEvent.addGlobalMonitorForEvents(
+                matching: [.keyDown, .leftMouseDown, .rightMouseDown, .otherMouseDown, .scrollWheel]
+            ) { [weak self] _ in
+                Task { @MainActor in self?.interrupted = true }
+            }
+        } else {
+            // Non-modifier key (function key): it arrives as `keyDown`, not
+            // `flagsChanged`. Fire on its press, ignoring auto-repeat while
+            // held. No tap-window/interrupt logic needed — a function key
+            // isn't held as a modifier in a combination.
+            flagsMonitor = NSEvent.addGlobalMonitorForEvents(matching: .keyDown) { [weak self] event in
+                let code = event.keyCode
+                let isRepeat = event.isARepeat
+                Task { @MainActor in
+                    guard let self, code == self.targetKeyCode, !isRepeat else { return }
+                    self.onTap()
+                }
+            }
         }
     }
 
