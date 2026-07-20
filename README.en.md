@@ -10,7 +10,19 @@
 </p>
 
 <p align="center">
+  <a href="https://github.com/hminnnnnn/hwhisper/releases/latest"><img src="https://img.shields.io/github/v/release/hminnnnnn/hwhisper?label=release&color=46B99C" alt="Latest release"></a>
+  <img src="https://img.shields.io/badge/platform-macOS%2014%2B-lightgrey?logo=apple" alt="Platform: macOS 14+">
+  <img src="https://img.shields.io/badge/Swift-6.0-F05138?logo=swift&logoColor=white" alt="Swift 6.0">
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue" alt="License: MIT"></a>
+  <img src="https://img.shields.io/badge/voice-on--device-46B99C" alt="On-device voice">
+</p>
+
+<p align="center">
   English (this document) · <a href="README.md">한국어</a>
+</p>
+
+<p align="center">
+  <img src="assets/demo.gif" width="600" alt="hwhisper demo — onboarding, settings, dictation indicator">
 </p>
 
 ---
