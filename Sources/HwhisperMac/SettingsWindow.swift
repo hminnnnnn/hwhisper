@@ -39,7 +39,16 @@ struct SettingsView: View {
                 }
 
                 if hotkeyMode == .combination {
-                    KeyboardShortcuts.Recorder("딕테이션 단축키:", name: .toggleDictation)
+                    // Custom recorder instead of `KeyboardShortcuts.Recorder`:
+                    // that view's `RecorderCocoa.init` calls the library's
+                    // `Bundle.module`, which `fatalError`s in our hand-
+                    // assembled (non-Xcode) .app because it can't locate the
+                    // KeyboardShortcuts resource bundle — crashing the app the
+                    // moment this Form row lays out (confirmed via a user
+                    // crash report). This captures the combo ourselves and
+                    // stores it through the non-UI `setShortcut` API, which
+                    // never touches `Bundle.module`.
+                    ShortcutRecorderRow()
                 }
             } footer: {
                 Group {
@@ -174,6 +183,87 @@ struct SettingsView: View {
         .onAppear {
             apiKey = RefinementSettings.apiKey(for: provider) ?? ""
         }
+    }
+}
+
+/// A self-contained keyboard-shortcut recorder that replaces
+/// `KeyboardShortcuts.Recorder` (which `fatalError`s via `Bundle.module` in
+/// our non-Xcode .app — see the call site). It captures the next key combo
+/// through a local `NSEvent` monitor and persists it with the library's
+/// non-UI `setShortcut(_:for:)`, so the actual global-hotkey registration
+/// (`GlobalHotkey`/`onKeyDown`) is unchanged.
+private struct ShortcutRecorderRow: View {
+    @State private var isRecording = false
+    @State private var display: String = ShortcutRecorderRow.currentDescription()
+    @State private var hasShortcut: Bool = KeyboardShortcuts.getShortcut(for: .toggleDictation) != nil
+    @State private var monitor: Any?
+
+    private static func currentDescription() -> String {
+        KeyboardShortcuts.getShortcut(for: .toggleDictation)?.description ?? "지정되지 않음"
+    }
+
+    var body: some View {
+        HStack {
+            Text("딕테이션 단축키:")
+            Spacer()
+            if !isRecording && hasShortcut {
+                Button("지우기") { clear() }
+                    .buttonStyle(.borderless)
+            }
+            Button {
+                isRecording ? stopRecording() : startRecording()
+            } label: {
+                Text(isRecording ? "키 조합을 누르세요… (Esc 취소)" : display)
+                    .monospacedDigit()
+                    .frame(minWidth: 150)
+                    .padding(.vertical, 3)
+                    .padding(.horizontal, 8)
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 6)
+                            .strokeBorder(isRecording ? Brand.accent : Color.secondary.opacity(0.4))
+                    )
+                    .foregroundStyle(isRecording ? Brand.accent : .primary)
+            }
+            .buttonStyle(.plain)
+        }
+        .onDisappear { stopRecording() }
+    }
+
+    private func startRecording() {
+        isRecording = true
+        // Local monitor fires on the main thread; assumeIsolated lets us touch
+        // @State/KeyboardShortcuts (main-actor) without a Sendable violation.
+        monitor = NSEvent.addLocalMonitorForEvents(matching: [.keyDown]) { event in
+            MainActor.assumeIsolated { handle(event) }
+            return nil // swallow the keystroke while recording
+        }
+    }
+
+    private func stopRecording() {
+        if let monitor { NSEvent.removeMonitor(monitor) }
+        monitor = nil
+        isRecording = false
+    }
+
+    private func handle(_ event: NSEvent) {
+        if event.keyCode == 53 { stopRecording(); return } // Esc cancels
+        // Require ⌘/⌥/⌃ so we never bind a bare letter (or Shift+letter) as a
+        // system-wide hotkey and clobber normal typing.
+        let mods = event.modifierFlags.intersection([.command, .option, .control])
+        guard !mods.isEmpty, let shortcut = KeyboardShortcuts.Shortcut(event: event) else {
+            NSSound.beep()
+            return
+        }
+        KeyboardShortcuts.setShortcut(shortcut, for: .toggleDictation)
+        display = shortcut.description
+        hasShortcut = true
+        stopRecording()
+    }
+
+    private func clear() {
+        KeyboardShortcuts.setShortcut(nil, for: .toggleDictation)
+        display = "지정되지 않음"
+        hasShortcut = false
     }
 }
 
