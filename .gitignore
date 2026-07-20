@@ -30,3 +30,7 @@ dictionary.json
 *.log
 .env
 .env.*
+
+# Internal dev / AI-agent working docs — keep local, do not publish
+CLAUDE.md
+BACKLOG.md
