@@ -1,0 +1,32 @@
+.build/
+.swiftpm/
+dist/
+*.xcodeproj
+DerivedData/
+.DS_Store
+*.o
+*.swiftmodule
+.index-build/
+
+# Downloaded model assets (WhisperKit, Ollama) — never commit
+*.mlmodelc
+*.gguf
+Models/
+
+# Intermediate TTS fixture synthesis output (regenerate via
+# fixtures/generate_fixtures.py); only fixtures/audio/*.wav is committed.
+fixtures/audio_raw/
+
+# OMC / Claude agent working state — internal metadata, never publish.
+.omc/
+
+# Never commit local secrets or user data, even if copied into the tree for
+# testing. The app writes these to ~/Library/Application Support/Hwhisper/,
+# not here — these rules are belt-and-suspenders for contributors.
+credentials.json
+dictionary.json
+*.sqlite3
+*.sqlite3-journal
+*.log
+.env
+.env.*
