@@ -280,6 +280,16 @@ macOS 자체 로그인 항목 기능을 사용합니다.
 
 이 앱을 직접 배포하려면 `docs/RELEASING.md`를 참고하세요 — 무료 트랙(self-signed dmg, 지금 가능)과 공증 트랙(D1: Apple Developer ID 서명 → 공증 → 스테이플 → Sparkle 자동 업데이트)의 구체 절차를 담고 있습니다.
 
+### 벤치마크 픽스처 재생성 (엔진 평가용)
+
+엔진 비교 하네스(`Sources/HwhisperEval`)가 쓰는 음성 픽스처(`fixtures/audio/*.wav`)는 용량이 커서 저장소에 커밋하지 않습니다. `fixtures/sentences.json`으로부터 다음 한 줄로 재생성합니다(추가 설치 불필요 — macOS 기본 `say`/`afconvert` 사용).
+
+```bash
+python3 fixtures/generate_fixtures.py
+```
+
+참고: 이 음성은 TTS 합성이라 벤치마크는 엔진 간 *상대 비교*용이며 실사용 정확도 인증은 아닙니다.
+
 ## 라이선스
 
 [MIT](LICENSE) — Copyright (c) 2026 hminn

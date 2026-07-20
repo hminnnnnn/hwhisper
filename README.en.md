@@ -247,6 +247,20 @@ After this one-time setup, rebuilds no longer re-request permissions.
 - **Speech engine:** macOS 26+ (Apple Silicon) uses Apple `SpeechTranscriber` (on-device). Older macOS automatically falls back to WhisperKit — this needs a **one-time model download (~600MB)**, uses more memory, and the **first dictation after launch can take a few minutes** (model load + first-run CoreML compilation; fast afterward within the same run). A "preparing model…" indicator shows during this.
 - **Network:** the default path (raw dictation) is fully offline after initial asset setup. Refinement's network use depends on the provider (cloud BYOK vs local LLM).
 
+## For developers
+
+To distribute the app yourself, see `docs/RELEASING.md` — it covers both the free track (self-signed dmg, available now) and the notarized track (Developer ID signing → notarization → stapling → Sparkle auto-update).
+
+### Regenerating benchmark fixtures
+
+The speech fixtures used by the engine-comparison harness (`Sources/HwhisperEval`, `fixtures/audio/*.wav`) are large and not committed. Regenerate them from `fixtures/sentences.json` with one command (no extra install — uses macOS's built-in `say`/`afconvert`):
+
+```bash
+python3 fixtures/generate_fixtures.py
+```
+
+Note: this audio is TTS-synthesized, so the bake-off is a *relative* engine comparison, not a real-world accuracy certification.
+
 ## License
 
 [MIT](LICENSE) — Copyright (c) 2026 hminn

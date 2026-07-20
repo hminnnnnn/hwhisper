@@ -34,3 +34,6 @@ dictionary.json
 # Internal dev / AI-agent working docs — keep local, do not publish
 CLAUDE.md
 BACKLOG.md
+
+# Benchmark fixtures — regenerate with fixtures/generate_fixtures.py (dev-only, ~6MB)
+fixtures/audio/
