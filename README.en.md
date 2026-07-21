@@ -41,15 +41,12 @@ Press a global hotkey and talk. Your **voice never leaves the device** — it's 
 
 ## How it works
 
-A summary of how each feature is actually implemented.
+Hotkey tap → mic capture → **on-device STT** (Apple `SpeechTranscriber`, WhisperKit on older Macs) → optional LLM refinement → insert at the cursor. Audio never leaves the device; even during refinement, only text is sent.
 
-- **Dictation pipeline** — hotkey tap → mic capture (16 kHz mono) → adaptive VAD trims leading/trailing silence → **on-device STT** (Apple `SpeechTranscriber` on macOS 26+, WhisperKit otherwise) → optional LLM refinement → insert at the cursor. The whole flow is a state machine (idle→listening→transcribing→refining→inserting→restoring), and back-to-back utterances are queued (depth 3). If nothing was said, it shows a "didn't catch that" warning instead of inserting.
-- **Insertion** — clipboard + ⌘V by default (universal). Whitelisted apps (TextEdit/Notes…) get direct Accessibility-API insertion with read-back verification. The target context is re-checked right before writing; if focus moved, the transcript is preserved to the clipboard rather than dropped. If a secure input field (password) is detected, insertion is skipped and nothing is written to the clipboard.
-- **Refinement** — one OpenAI-compatible chat-completions client covers Gemini/Groq/Ollama/custom. Only the **text** is sent (never audio), a custom endpoint must be `https://` (or local `localhost`), and on timeout (8 s default) the raw text is inserted.
-- **Personal dictionary (triple defense)** — ① **recognition biasing**: terms are passed as the STT `contextualStrings` so they're recognized correctly upfront; ② **refinement protection**: only terms actually present in the transcript are sent to the LLM as "don't change these" (passing an absent term makes the LLM hallucinate it in); ③ **last-mile substitution**: after refinement, known misspellings are rewritten to the canonical term (longest-match first, case-insensitive with word boundaries for Latin).
-- **History** — a local **SQLite** DB (`~/Library/Application Support/Hwhisper/history.sqlite3`, 0600) stores raw/refined text, target app, and speech length; search uses `LIKE` substring matching (not FTS) so Korean partial matches work. The home dashboard aggregates this week's rows from it.
-- **Hotkey detection** — a single modifier key is detected as a short "tap" via `flagsChanged`; function keys (F1–F20) via `keyDown` (held with another key → ignored, so it never disrupts normal use). Combos use the KeyboardShortcuts library. Global detection needs macOS Input Monitoring permission.
-- **Privacy & storage** — audio never leaves the device. API keys, history, and the personal dictionary all live under `~/Library/Application Support/Hwhisper/` with owner-only (0600) permissions.
+- **Insertion** — clipboard + ⌘V by default (universal); some apps get direct Accessibility-API insertion. Secure input fields are skipped.
+- **Personal dictionary** — three stages (recognition hint → refinement protection → last-mile substitution) keep proper nouns spelled right.
+- **Refinement** — one OpenAI-compatible client for Gemini/Groq/Ollama/custom; inserts the raw text on failure or timeout.
+- **Storage** — history (SQLite), dictionary, and API keys all stay local (`~/Library/Application Support/Hwhisper/`, owner-only 0600).
 
 ## Requirements
 
