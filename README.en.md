@@ -22,7 +22,7 @@
 </p>
 
 <p align="center">
-  <img src="assets/demo.gif" width="600" alt="hwhisper demo — onboarding, settings, dictation indicator">
+  <img src="assets/demo.gif" width="720" alt="hwhisper demo — onboarding, home dashboard, history, personal dictionary, settings">
 </p>
 
 ---
@@ -31,12 +31,25 @@ Press a global hotkey and talk. Your **voice never leaves the device** — it's 
 
 ## Features
 
-- **On-device dictation** — Apple `SpeechTranscriber` (Korean CER 1.9%) turns speech into text without leaving the machine. Single-key toggle (Right-⌘ / Right-⌥ / fn) or a key combo.
+- **On-device dictation** — Apple `SpeechTranscriber` (Korean CER 1.9%) turns speech into text without leaving the machine; older Macs fall back to WhisperKit automatically.
+- **Flexible hotkey** — single-key toggle (Right-⌘ / Right-⌥ / fn presets, or record your own modifier/function key) or a key combo. Cancel mid-recording with the ✕ on the indicator.
 - **LLM refinement** — filler removal, punctuation fixes, restructuring. Choose Gemini/Groq (free tier), local Ollama, or a custom endpoint. Always optional; falls back to the raw transcript on any failure.
 - **Personal dictionary** — register names/terms you often get wrong and they come out right across recognition, refinement, and a final substitution pass.
 - **History** — everything you dictate (raw + refined) is stored, searchable, and copyable, on this Mac only. Clearable anytime.
 - **Home dashboard** — this week's dictation time, word count, time saved, and per-app usage.
 - **Free and unlimited** — no subscription, no word cap. Works with a free refinement API key (or none at all).
+
+## How it works
+
+A summary of how each feature is actually implemented.
+
+- **Dictation pipeline** — hotkey tap → mic capture (16 kHz mono) → adaptive VAD trims leading/trailing silence → **on-device STT** (Apple `SpeechTranscriber` on macOS 26+, WhisperKit otherwise) → optional LLM refinement → insert at the cursor. The whole flow is a state machine (idle→listening→transcribing→refining→inserting→restoring), and back-to-back utterances are queued (depth 3). If nothing was said, it shows a "didn't catch that" warning instead of inserting.
+- **Insertion** — clipboard + ⌘V by default (universal). Whitelisted apps (TextEdit/Notes…) get direct Accessibility-API insertion with read-back verification. The target context is re-checked right before writing; if focus moved, the transcript is preserved to the clipboard rather than dropped. If a secure input field (password) is detected, insertion is skipped and nothing is written to the clipboard.
+- **Refinement** — one OpenAI-compatible chat-completions client covers Gemini/Groq/Ollama/custom. Only the **text** is sent (never audio), a custom endpoint must be `https://` (or local `localhost`), and on timeout (8 s default) the raw text is inserted.
+- **Personal dictionary (triple defense)** — ① **recognition biasing**: terms are passed as the STT `contextualStrings` so they're recognized correctly upfront; ② **refinement protection**: only terms actually present in the transcript are sent to the LLM as "don't change these" (passing an absent term makes the LLM hallucinate it in); ③ **last-mile substitution**: after refinement, known misspellings are rewritten to the canonical term (longest-match first, case-insensitive with word boundaries for Latin).
+- **History** — a local **SQLite** DB (`~/Library/Application Support/Hwhisper/history.sqlite3`, 0600) stores raw/refined text, target app, and speech length; search uses `LIKE` substring matching (not FTS) so Korean partial matches work. The home dashboard aggregates this week's rows from it.
+- **Hotkey detection** — a single modifier key is detected as a short "tap" via `flagsChanged`; function keys (F1–F20) via `keyDown` (held with another key → ignored, so it never disrupts normal use). Combos use the KeyboardShortcuts library. Global detection needs macOS Input Monitoring permission.
+- **Privacy & storage** — audio never leaves the device. API keys, history, and the personal dictionary all live under `~/Library/Application Support/Hwhisper/` with owner-only (0600) permissions.
 
 ## Requirements
 
