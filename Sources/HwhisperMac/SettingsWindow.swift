@@ -25,6 +25,7 @@ struct SettingsView: View {
     @State private var apiKey = ""
     @State private var timeoutText = String(format: "%.0f", RefinementSettings.timeout)
     @State private var refinementStyle = RefinementSettings.refinementStyle
+    @State private var showStyleExamples = false
 
     var body: some View {
         Form {
@@ -64,7 +65,12 @@ struct SettingsView: View {
                     case .singleKeyRightCommand, .singleKeyRightOption:
                         Text("선택한 키를 짧게 한 번 탭하면 녹음이 시작/종료됩니다. 다른 키와 함께 누르면(조합, 예: 우측⌘+C) 무시되어 원래 동작을 방해하지 않습니다. 최초 사용 시 '입력 모니터링' 권한 요청이 뜰 수 있습니다.")
                     case .singleKeyCustom:
-                        Text("원하는 키를 직접 지정합니다 — 보조키(⌘/⌥/⌃/⇧ 좌·우, fn)와 함수키(F1~F20, 외장 키보드의 F13~F19 포함)를 쓸 수 있습니다. 일반 문자·숫자·방향키·Return 등은 타이핑/이동과 충돌해 지원하지 않습니다(선택 시 안내가 표시됩니다). 지정한 키를 짧게 탭하면 녹음이 시작/종료됩니다.")
+                        // verbatim: SwiftUI Text parses a String literal as a
+                        // LocalizedStringKey and renders inline Markdown. The
+                        // tildes in "F1~F20"/"F13~F19" would otherwise trigger
+                        // GFM strikethrough (single ~ is enough), striking out
+                        // everything between them. verbatim disables Markdown.
+                        Text(verbatim: "원하는 키를 직접 지정합니다 — 보조키(⌘/⌥/⌃/⇧ 좌·우, fn)와 함수키(F1~F20, 외장 키보드의 F13~F19 포함)를 쓸 수 있습니다. 일반 문자·숫자·방향키·Return 등은 타이핑/이동과 충돌해 지원하지 않습니다(선택 시 안내가 표시됩니다). 지정한 키를 짧게 탭하면 녹음이 시작/종료됩니다.")
                     }
                 }
                 .font(.footnote)
@@ -124,9 +130,19 @@ struct SettingsView: View {
                         RefinementSettings.refinementStyle = newValue
                     }
 
-                    Text("구조화: 나열은 목록으로, 주제는 단락으로 재구성합니다.")
-                        .font(.footnote)
-                        .foregroundStyle(.secondary)
+                    VStack(alignment: .leading, spacing: 7) {
+                        Text("‘다듬기 + 구조화’는 다듬기를 그대로 포함하고, 여기에 항목이 여럿이면 번호 목록으로 정리하는 단계가 더해집니다. (필러 제거·문장부호 교정·말투 유지는 두 방식 공통)")
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                        DisclosureGroup(isExpanded: $showStyleExamples) {
+                            styleExamples
+                        } label: {
+                            Text(showStyleExamples ? "예시 숨기기" : "예시 보기")
+                                .font(.footnote.weight(.medium))
+                                .foregroundStyle(Brand.accent)
+                        }
+                        .tint(Brand.accent)
+                    }
 
                     Picker("프로바이더:", selection: $provider) {
                         ForEach(RefinerProvider.allCases, id: \.self) { p in
@@ -189,6 +205,40 @@ struct SettingsView: View {
         .onAppear {
             apiKey = RefinementSettings.apiKey(for: provider) ?? ""
         }
+    }
+
+    // Real refiner outputs (HwhisperEval --refine-compare, gemini-3.1-flash-lite)
+    // so the preview matches what the app actually produces.
+    private static let exampleRaw = "어 이번에 개선할 게 세 가지인데 일단 홈 화면에 이번 주 통계가 안 뜨는 거 고치고 그리고 검색이 좀 느리니까 그것도 개선하고 마지막으로 온보딩에서 가끔 타임아웃 나는 거 그거 봐줘."
+    private static let examplePolish = "이번에 개선할 게 세 가지인데, 일단 홈 화면에 이번 주 통계가 안 뜨는 거 고치고, 그리고 검색이 좀 느리니까 그것도 개선하고, 마지막으로 온보딩에서 가끔 타임아웃 나는 거 그거 봐줘."
+    private static let exampleStructure = "이번에 개선할 게 세 가지인데,\n1. 홈 화면에 이번 주 통계가 안 뜨는 거 고치고\n2. 검색이 좀 느리니까 그것도 개선하고\n3. 온보딩에서 가끔 타임아웃 나는 거 그거 봐줘."
+
+    /// Before/after preview of both styles on the same dictation, so the user
+    /// can see how 다듬기 vs 구조화 actually differ before choosing.
+    private var styleExamples: some View {
+        VStack(alignment: .leading, spacing: 9) {
+            exampleBlock("원문 (받아쓰기)", Self.exampleRaw, tint: .secondary)
+            exampleBlock("다듬기", Self.examplePolish, tint: Brand.accent)
+            exampleBlock("다듬기 + 구조화", Self.exampleStructure, tint: Brand.accent)
+        }
+        .padding(.top, 6)
+    }
+
+    private func exampleBlock(_ title: String, _ body: String, tint: Color) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(title)
+                .font(.caption2.weight(.semibold))
+                .foregroundStyle(tint)
+            // verbatim: sample text contains "1." list markers and must not be
+            // reinterpreted as Markdown.
+            Text(verbatim: body)
+                .font(.footnote)
+                .foregroundStyle(.primary)
+                .fixedSize(horizontal: false, vertical: true)
+                .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .padding(9)
+        .background(Color.primary.opacity(0.05), in: RoundedRectangle(cornerRadius: 7))
     }
 }
 

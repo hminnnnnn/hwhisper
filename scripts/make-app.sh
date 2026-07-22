@@ -16,7 +16,7 @@ cd "$ROOT_DIR"
 
 APP_NAME="Hwhisper"
 BUNDLE_ID="com.hminn.hwhisper"
-BUNDLE_VERSION="0.2.5"
+BUNDLE_VERSION="0.2.6"
 DIST_DIR="$ROOT_DIR/dist"
 APP_DIR="$DIST_DIR/$APP_NAME.app"
 CONTENTS_DIR="$APP_DIR/Contents"

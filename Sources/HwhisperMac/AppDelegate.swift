@@ -78,6 +78,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// deliberately simple gesture (no separate key binding) since a real
     /// utterance essentially never finishes inside this window.
     private static let cancelTapWindow: TimeInterval = 0.4
+    /// Guided recording duration (Typeless-style). The user speaks FREELY for
+    /// `recordingGracePeriod`; only if they're still going past that point does
+    /// a `recordingFinalWindow` countdown begin with an on-pill notice ("N초 후
+    /// 음성 입력이 종료됩니다"), then a hard stop. Audio up to the cutoff is
+    /// still transcribed + refined — nothing is discarded, and the whole
+    /// transcript stays within a single coherent refinement call (no
+    /// context-splitting chunking).
+    ///
+    /// Sizing: measured refinement output for Korean is ~0.46 tokens/char
+    /// (Gemini 3.1 real E2E, HwhisperEval --refine-test), so the 8192-token
+    /// ceiling only bites around ~16,000 chars (~1 hour of speech) — tokens are
+    /// NOT the real limit; latency, coherence, and editing risk are. So the cap
+    /// is set for UX, generously: 180s free speech ≈ ~800 chars (a long memo),
+    /// + a 60s final window ⇒ 240s / ~1,080 chars total → output only ~500
+    /// tokens (~7% of the ceiling). A 1,600-char input refined coherently in
+    /// 1.4s in testing, so there's ample headroom to raise these if wanted.
+    private static let recordingGracePeriod: TimeInterval = 180
+    private static let recordingFinalWindow: TimeInterval = 60
+    private static var recordingMaxDuration: TimeInterval { recordingGracePeriod + recordingFinalWindow }
     private static let notificationAuthorizationRequestedKey = "notificationAuthorizationRequested"
     private static let keychainMigrationAttemptedKey = "keychainMigrationAttempted"
 
@@ -124,6 +143,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var captureSnapshot: TargetContextSnapshot?
     private var isCapturing = false
     private var captureStartedAt: Date?
+    /// Ticks once a second while recording to drive the countdown warning and
+    /// the hard auto-stop (see `startRecordingLimitTimer`). Invalidated by
+    /// every path that ends a recording.
+    private var recordingLimitTimer: Timer?
     /// Set once notifications are confirmed denied, so `postNotification`
     /// logs the "skipping" fact exactly once instead of on every call.
     private var hasLoggedNotificationsDenied = false
@@ -363,6 +386,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // without needing a real silent recording).
         if arguments.contains("--test-warning") {
             showNoSpeechWarning()
+        }
+        // Test-only: renders the listening pill in its guided-duration final
+        // window (the "N초 후 음성 입력이 종료됩니다" countdown notice) so the
+        // second-line layout/color can be checked without waiting 3 minutes.
+        if arguments.contains("--test-countdown") {
+            recordingIndicator.showListening()
+            recordingIndicator.updateLevel(0.6)
+            recordingIndicator.updateCountdown(remaining: 12)
         }
         // Test-only: reproduces the "indicator stops appearing after repeated
         // use" race — show success (auto-hides at 0.9s), then start a new
@@ -673,6 +704,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             recordingIndicator.showListening()
             pipelineActor.transition(to: .listening)
             HwhisperLog.log("recording started")
+            startRecordingLimitTimer()
         } catch {
             isCapturing = false
             captureStartedAt = nil
@@ -686,6 +718,39 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
+    /// Drives the guided-duration UX (Typeless-style): ticks once a second
+    /// while recording, shows a countdown in the pill during the final
+    /// `recordingMaxDuration - recordingWarnAt` seconds, then hard-stops at
+    /// `recordingMaxDuration` by routing through the normal stop path — so the
+    /// captured audio is transcribed + refined, never dropped.
+    private func startRecordingLimitTimer() {
+        recordingLimitTimer?.invalidate()
+        recordingLimitTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
+            MainActor.assumeIsolated { self?.recordingLimitTick() }
+        }
+    }
+
+    private func stopRecordingLimitTimer() {
+        recordingLimitTimer?.invalidate()
+        recordingLimitTimer = nil
+        recordingIndicator.updateCountdown(remaining: nil)
+    }
+
+    private func recordingLimitTick() {
+        guard isCapturing, let startedAt = captureStartedAt else {
+            stopRecordingLimitTimer()
+            return
+        }
+        let elapsed = Date().timeIntervalSince(startedAt)
+        if elapsed >= Self.recordingMaxDuration {
+            HwhisperLog.log("recording auto-stopped at max duration (\(Int(Self.recordingMaxDuration))s)")
+            stopCaptureAndEnqueue() // invalidates the timer via stopRecordingLimitTimer
+        } else if elapsed >= Self.recordingGracePeriod {
+            let remaining = max(0, Int(ceil(Self.recordingMaxDuration - elapsed)))
+            recordingIndicator.updateCountdown(remaining: remaining)
+        }
+    }
+
     /// §3.1 cancel path: discards the in-flight recording outright — no
     /// transcription, no queueing, nothing preserved to the clipboard
     /// (there is no transcript yet to preserve). Triggered either by a
@@ -693,6 +758,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// or by clicking the indicator's inline X at any point while listening.
     private func cancelCapture() {
         guard isCapturing else { return }
+        stopRecordingLimitTimer()
         isCapturing = false
         captureStartedAt = nil
         captureSnapshot = nil
@@ -711,6 +777,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// refine/insert to finish.
     private func stopCaptureAndEnqueue() {
         guard isCapturing else { return }
+        stopRecordingLimitTimer()
         isCapturing = false
         captureStartedAt = nil
 
@@ -913,7 +980,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 style: style
             )
             let refiner = OpenAICompatibleRefiner(config: config)
-            let refined = try await withTimeout(timeout) {
+            // Long input is refined as ceil(chunks / concurrency) rounds of
+            // parallel calls (see OpenAICompatibleRefiner.refineChunked). Give
+            // the outer bound that many timeouts of room so it doesn't kill a
+            // legitimately long refinement; wall-clock stays ≈ that many calls.
+            let chunkCount = OpenAICompatibleRefiner.chunkCount(for: rawText)
+            let rounds = max(1, Int(ceil(Double(chunkCount) / Double(OpenAICompatibleRefiner.chunkConcurrency))))
+            let effectiveTimeout = min(45, timeout * Double(rounds))
+            let refined = try await withTimeout(effectiveTimeout) {
                 try await refiner.refine(rawText, context: context)
             }
             let elapsed = Date().timeIntervalSince(start)

@@ -75,6 +75,10 @@ private struct RecordingIndicatorView: View {
     /// the click-to-cancel affordance users asked for instead of the
     /// fiddly double-tap-within-0.4s gesture.
     var onCancel: (() -> Void)? = nil
+    /// Seconds until the recording hard-stops, shown as an amber countdown in
+    /// the pill's final seconds (guided-duration UX). `nil` outside the warning
+    /// window (the normal listening pill shows no timer).
+    var remainingSeconds: Int? = nil
 
     @State private var isPulsing = false
     @State private var successScale: CGFloat = 0.5
@@ -94,12 +98,12 @@ private struct RecordingIndicatorView: View {
     private let barCount = 13
 
     var body: some View {
-        HStack(alignment: reason == nil ? .center : .top, spacing: 11) {
+        HStack(alignment: hasSecondLine ? .top : .center, spacing: 11) {
             statusIcon
                 .frame(width: 17, height: 17)
                 // Nudge the icon to sit on the title's optical baseline when
                 // there's a second line below.
-                .padding(.top, reason == nil ? 0 : 1)
+                .padding(.top, hasSecondLine ? 1 : 0)
             VStack(alignment: .leading, spacing: 3) {
                 HStack(alignment: .center, spacing: 10) {
                     Text(statusText)
@@ -130,6 +134,17 @@ private struct RecordingIndicatorView: View {
                         .lineLimit(3)
                         .fixedSize(horizontal: false, vertical: true)
                         .frame(maxWidth: 300, alignment: .leading)
+                }
+                // Guided-duration notice: shown in the recording's final
+                // seconds so the user knows exactly when input will end and can
+                // wrap up (informative, not an error — amber, plain sentence).
+                if state == .listening, let remainingSeconds {
+                    Text("\(remainingSeconds)초 후 음성 입력이 종료됩니다")
+                        .font(.system(size: 12, weight: .medium))
+                        .tracking(-0.1)
+                        .monospacedDigit()
+                        .foregroundStyle(Color(red: 0.95, green: 0.75, blue: 0.35))
+                        .fixedSize()
                 }
             }
         }
@@ -162,6 +177,11 @@ private struct RecordingIndicatorView: View {
         case .preparing(let message): message
         default: nil
         }
+    }
+
+    /// Whether the pill renders a second line (drives icon/row alignment).
+    private var hasSecondLine: Bool {
+        reason != nil || (state == .listening && remainingSeconds != nil)
     }
 
     @ViewBuilder
@@ -301,6 +321,9 @@ final class RecordingIndicatorController {
     private var hostingView: NSHostingView<RecordingIndicatorView>?
     private var state: RecordingIndicatorState = .listening
     private var level: Float = 0
+    /// Guided-duration countdown shown in the listening pill's final seconds;
+    /// `nil` outside the warning window.
+    private var remainingSeconds: Int?
     private var autoHideWorkItem: DispatchWorkItem?
     /// True while a `hide()` fade is in flight. `present()` clears it so the
     /// fade's completion no longer `orderOut`s the (now re-shown) panel.
@@ -314,13 +337,28 @@ final class RecordingIndicatorController {
     /// Single place the SwiftUI root view is built so every construction
     /// site (present/updateLevel/panel creation) carries the cancel handler.
     private func makeRootView() -> RecordingIndicatorView {
-        RecordingIndicatorView(state: state, level: level, onCancel: onCancel)
+        RecordingIndicatorView(state: state, level: level, onCancel: onCancel, remainingSeconds: remainingSeconds)
     }
 
     func showListening() {
         level = 0
+        remainingSeconds = nil
         present(.listening)
         playSound(named: "Tink")
+    }
+
+    /// Guided-duration countdown (see `AppDelegate.recordingLimitTick`). Shows
+    /// "N초 후 음성 입력이 종료됩니다" in the listening pill; `nil` clears it.
+    /// Refits the panel only when the line count actually changes (nil↔value),
+    /// so per-second number updates are cheap redraws, not resizes.
+    func updateCountdown(remaining: Int?) {
+        let lineCountChanged = (remainingSeconds == nil) != (remaining == nil)
+        remainingSeconds = remaining
+        guard state == .listening else { return }
+        hostingView?.rootView = makeRootView()
+        if lineCountChanged {
+            resizePanelToFitContent(animated: true)
+        }
     }
 
     /// `level` arrives from `AudioCapture.onLevelUpdate`, fired on the
