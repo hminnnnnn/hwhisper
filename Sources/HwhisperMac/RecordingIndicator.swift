@@ -302,6 +302,9 @@ final class RecordingIndicatorController {
     private var state: RecordingIndicatorState = .listening
     private var level: Float = 0
     private var autoHideWorkItem: DispatchWorkItem?
+    /// True while a `hide()` fade is in flight. `present()` clears it so the
+    /// fade's completion no longer `orderOut`s the (now re-shown) panel.
+    private var hidePending = false
     /// Set by `AppDelegate`; invoked when the user clicks the inline X while
     /// listening. Cancels the recording regardless of how long it's been
     /// running (unlike the double-tap gesture, which only cancels within
@@ -399,6 +402,7 @@ final class RecordingIndicatorController {
     func hide() {
         autoHideWorkItem?.cancel()
         guard let panel, panel.isVisible else { return }
+        hidePending = true
         var frame = panel.frame
         frame.origin.y -= 8
         NSAnimationContext.runAnimationGroup { context in
@@ -406,13 +410,21 @@ final class RecordingIndicatorController {
             context.timingFunction = CAMediaTimingFunction(name: .easeIn)
             panel.animator().alphaValue = 0
             panel.animator().setFrame(frame, display: true)
-        } completionHandler: { [weak panel] in
-            Task { @MainActor in panel?.orderOut(nil) }
+        } completionHandler: { [weak self] in
+            Task { @MainActor in
+                // If a `present()` ran during the fade it cleared `hidePending`
+                // and re-showed the panel — don't order it out from under the
+                // new state.
+                guard let self, self.hidePending else { return }
+                self.hidePending = false
+                self.panel?.orderOut(nil)
+            }
         }
     }
 
     private func present(_ newState: RecordingIndicatorState) {
         autoHideWorkItem?.cancel()
+        hidePending = false // cancel any in-flight hide's pending orderOut
         state = newState
         let panel = makePanelIfNeeded()
         let wasVisible = panel.isVisible
@@ -434,6 +446,12 @@ final class RecordingIndicatorController {
                 hostingView?.rootView = makeRootView()
             }
             resizePanelToFitContent(animated: true)
+            // Restore opacity: a new recording can begin during the 0.25s hide
+            // fade, when the panel is still `isVisible` but its alpha is being
+            // animated toward 0. Without this the pill orders front at alpha 0
+            // (invisible) and stays stuck there across later state changes —
+            // "the indicator stopped appearing after repeated use".
+            panel.animator().alphaValue = 1
             panel.orderFrontRegardless()
         } else {
             hostingView?.rootView = makeRootView()

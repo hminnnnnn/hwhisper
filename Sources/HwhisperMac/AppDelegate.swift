@@ -364,6 +364,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if arguments.contains("--test-warning") {
             showNoSpeechWarning()
         }
+        // Test-only: reproduces the "indicator stops appearing after repeated
+        // use" race — show success (auto-hides at 0.9s), then start a new
+        // listening state DURING the 0.25s hide fade (~1.0s). If the pill is
+        // invisible after this, the alpha-restore bug is present.
+        if arguments.contains("--test-indicator-race") {
+            recordingIndicator.showSuccess()
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
+                self?.recordingIndicator.showListening()
+                self?.recordingIndicator.updateLevel(0.6)
+            }
+        }
     }
 
     /// As an `.accessory` (menu-bar-only, no Dock icon) app, this process
