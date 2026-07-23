@@ -951,8 +951,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // term absent from the input, if listed as "keep this term", makes the
         // LLM inject it into the output as a salient entity (observed live:
         // "오웬" spliced onto a sentence that never contained it).
+        // No app/bundle identifier is passed to the refiner: the transcript
+        // must not be adapted to the focused app, and doing so only ever risked
+        // leaking the app name into the output (user report). snapshot's bundle
+        // ID is still used for history stats, just never for refinement.
         let context = RefinementContext(
-            frontmostBundleID: snapshot.bundleIdentifier,
             protectedTerms: await personalDictionary.protectedTerms(presentIn: rawText)
         )
 

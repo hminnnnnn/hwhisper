@@ -1,14 +1,16 @@
 import Foundation
 
-/// Context passed to a refiner so it can adapt tone/formatting and protect
-/// personal-dictionary terms from being re-mangled or translated (§3, N-3/N-4).
+/// Context passed to a refiner to protect personal-dictionary terms from being
+/// re-mangled or translated (§3, N-3/N-4).
+///
+/// Intentionally carries NO app/frontmost-bundle identifier: refinement must
+/// never adapt the transcript to whichever app is focused, and feeding the app
+/// name in only ever risked leaking it into the output (removed for good).
 public struct RefinementContext: Sendable, Equatable {
-    public let frontmostBundleID: String?
     /// Personal-dictionary terms passed as protected spans (N-3).
     public let protectedTerms: [String]
 
-    public init(frontmostBundleID: String? = nil, protectedTerms: [String] = []) {
-        self.frontmostBundleID = frontmostBundleID
+    public init(protectedTerms: [String] = []) {
         self.protectedTerms = protectedTerms
     }
 }
