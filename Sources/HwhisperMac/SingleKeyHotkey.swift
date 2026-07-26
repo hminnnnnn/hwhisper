@@ -183,10 +183,20 @@ final class SingleKeyHotkeyMonitor {
         guard let keyCode = mode.singleKeyCode else { return }
         targetKeyCode = keyCode
 
+        // These global-monitor closures are delivered synchronously on the
+        // main thread (verified: crash reports show com.apple.main-thread). We
+        // run their work via `MainActor.assumeIsolated`, NOT `Task { @MainActor
+        // in … }`. Creating a Task here crashed the app: on macOS 26.4.1, after
+        // the (LSUIElement, often napped) app had been idle, the first
+        // `Task { @MainActor }` spawned from this Carbon/HIToolbox event-dispatch
+        // stack faulted inside `swift_task_isMainExecutorImpl` (EXC_BAD_ACCESS,
+        // always at 0x1800001120). `assumeIsolated` runs synchronously and takes
+        // the lighter isolation-assertion path already proven safe by
+        // `recordingLimitTick`'s timer callback on the same OS.
         if HotkeyMode.modifierInfo(for: keyCode) != nil {
             // Modifier key: detect a clean solo tap via flagsChanged.
             flagsMonitor = NSEvent.addGlobalMonitorForEvents(matching: .flagsChanged) { [weak self] event in
-                Task { @MainActor in self?.handleFlagsChanged(event) }
+                MainActor.assumeIsolated { self?.handleFlagsChanged(event) }
             }
             // Any other keyboard/mouse input between the target key's down
             // and up disqualifies the tap — this is what keeps e.g. right-⌘+C
@@ -194,7 +204,7 @@ final class SingleKeyHotkeyMonitor {
             interruptMonitor = NSEvent.addGlobalMonitorForEvents(
                 matching: [.keyDown, .leftMouseDown, .rightMouseDown, .otherMouseDown, .scrollWheel]
             ) { [weak self] _ in
-                Task { @MainActor in self?.interrupted = true }
+                MainActor.assumeIsolated { self?.interrupted = true }
             }
         } else {
             // Non-modifier key (function key): it arrives as `keyDown`, not
@@ -204,7 +214,7 @@ final class SingleKeyHotkeyMonitor {
             flagsMonitor = NSEvent.addGlobalMonitorForEvents(matching: .keyDown) { [weak self] event in
                 let code = event.keyCode
                 let isRepeat = event.isARepeat
-                Task { @MainActor in
+                MainActor.assumeIsolated {
                     guard let self, code == self.targetKeyCode, !isRepeat else { return }
                     self.onTap()
                 }
