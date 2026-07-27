@@ -8,6 +8,57 @@ import HwhisperCore
 /// sections. `KeyboardShortcuts.Recorder` persists the chosen shortcut to
 /// `UserDefaults` itself; refinement/language settings persist via
 /// `RefinementSettings` (API keys go to the Keychain, never UserDefaults).
+/// State of the Settings "연결 테스트" button (Feature 1).
+private enum ConnTestState: Equatable { case idle, testing, success, failure(String) }
+
+/// A link-styled button with clear hover feedback — underline + brighter tint +
+/// pointing-hand cursor. SwiftUI's plain `Link` gives no hover affordance on
+/// macOS, so a click target didn't read as clickable (user request).
+private struct HoverLink: View {
+    let title: String
+    let systemImage: String
+    let url: URL
+    var help: String = ""
+    @State private var hovering = false
+
+    var body: some View {
+        Button {
+            NSWorkspace.shared.open(url)
+        } label: {
+            Label {
+                Text(title + " ↗").underline(hovering)
+            } icon: {
+                Image(systemName: systemImage)
+            }
+            .font(.footnote.weight(hovering ? .semibold : .regular))
+            .foregroundStyle(hovering ? Brand.accentLight : Brand.accent)
+        }
+        .buttonStyle(.plain)
+        .help(help)
+        .onHover { h in
+            hovering = h
+            if h { NSCursor.pointingHand.set() } else { NSCursor.arrow.set() }
+        }
+    }
+}
+
+/// Races `operation` against a deadline so a hung request never leaves the
+/// Settings test spinner stuck (mirrors the onboarding wizard's helper).
+private func withSettingsTimeout<T: Sendable>(
+    _ seconds: TimeInterval, operation: @escaping @Sendable () async throws -> T
+) async throws -> T {
+    try await withThrowingTaskGroup(of: T.self) { group in
+        group.addTask { try await operation() }
+        group.addTask {
+            try await Task.sleep(nanoseconds: UInt64(max(0, seconds) * 1_000_000_000))
+            throw TextRefinerError.timedOut
+        }
+        guard let result = try await group.next() else { throw TextRefinerError.timedOut }
+        group.cancelAll()
+        return result
+    }
+}
+
 struct SettingsView: View {
     /// True when hosted inside the main window's detail pane (which scrolls
     /// and sizes itself) rather than the fixed-size standalone window.
@@ -23,9 +74,14 @@ struct SettingsView: View {
     @State private var model = RefinementSettings.model
     @State private var customEndpoint = RefinementSettings.customEndpoint
     @State private var apiKey = ""
-    @State private var timeoutText = String(format: "%.0f", RefinementSettings.timeout)
     @State private var refinementStyle = RefinementSettings.refinementStyle
     @State private var showStyleExamples = false
+    // Feature 1: Settings connection test
+    @State private var connTestState: ConnTestState = .idle
+    // Feature 2: manual-model-entry toggle for the curated picker
+    @State private var customModelEntry = false
+    // Compact API-key UX: the masked field is hidden once a key is set.
+    @State private var editingKey = false
 
     var body: some View {
         Form {
@@ -153,37 +209,115 @@ struct SettingsView: View {
                         RefinementSettings.provider = newValue
                         model = RefinementSettings.model
                         apiKey = RefinementSettings.apiKey(for: newValue) ?? ""
+                        connTestState = .idle
+                        customModelEntry = false
+                        editingKey = false
                     }
 
-                    TextField("모델명:", text: $model)
-                        .onChange(of: model) { _, newValue in
-                            RefinementSettings.model = newValue
+                    // MODEL GROUP — picker + feature badges + note wrapped in a
+                    // VStack so they form ONE grouped-Form row. Otherwise the
+                    // grouped style draws a divider between the picker and its
+                    // own badges/note, making them read as unrelated (user
+                    // request). "직접 입력" is the escape hatch for any model ID.
+                    VStack(alignment: .leading, spacing: 8) {
+                        if customModelEntry {
+                            HStack {
+                                TextField("모델명:", text: $model)
+                                    .onChange(of: model) { _, v in RefinementSettings.model = v }
+                                Button("목록에서 선택") { customModelEntry = false }
+                                    .font(.footnote)
+                            }
+                        } else {
+                            Picker("모델:", selection: $model) {
+                                ForEach(modelChoices, id: \.id) { c in
+                                    Text(c.id).tag(c.id)
+                                }
+                                Text("직접 입력…").tag("__custom__")
+                            }
+                            .onChange(of: model) { _, v in
+                                if v == "__custom__" { model = RefinementSettings.model; customModelEntry = true }
+                                else { RefinementSettings.model = v }
+                            }
+                            if !selectedModelBadges.isEmpty {
+                                HStack(spacing: 6) {
+                                    ForEach(selectedModelBadges, id: \.self) { badge in
+                                        Text(badge)
+                                            .font(.caption2.weight(.semibold))
+                                            .padding(.horizontal, 8)
+                                            .padding(.vertical, 3)
+                                            .background(Capsule().fill(Brand.accent.opacity(0.16)))
+                                            .foregroundStyle(Brand.accent)
+                                    }
+                                }
+                                // Right-aligned so the badges sit directly under
+                                // the model name (which the picker renders on the
+                                // right), not off on the left (user request).
+                                .frame(maxWidth: .infinity, alignment: .trailing)
+                            }
+                            if provider == .gemini {
+                                Text("받아쓰기 정제엔 경량 flash 계열이 빠르고 무료 한도에 넉넉해, 기본값이 이 작업에 적합합니다.")
+                                    .font(.caption).foregroundStyle(.secondary)
+                            }
                         }
-
-                    if provider == .custom {
-                        TextField("엔드포인트 URL:", text: $customEndpoint, prompt: Text("https://…/chat/completions"))
-                            .onChange(of: customEndpoint) { _, newValue in
-                                RefinementSettings.customEndpoint = newValue
-                            }
                     }
 
-                    if provider.requiresAPIKey {
-                        SecureField("API 키:", text: $apiKey)
-                            .onChange(of: apiKey) { _, newValue in
-                                RefinementSettings.setAPIKey(newValue, for: provider)
-                            }
-                    } else {
-                        Text("Ollama 로컬 서버는 API 키가 필요 없습니다 (localhost에서 직접 실행 중이어야 합니다).")
-                            .font(.footnote)
-                            .foregroundStyle(.secondary)
-                    }
-
-                    TextField("타임아웃(초):", text: $timeoutText)
-                        .onChange(of: timeoutText) { _, newValue in
-                            if let seconds = Double(newValue), seconds > 0 {
-                                RefinementSettings.timeout = seconds
-                            }
+                    // API-KEY GROUP — key status + connection test + usage + the
+                    // request timeout wrapped in ONE VStack row, so everything
+                    // about the key/connection stays together without dividers
+                    // splitting them off (user request). For custom provider the
+                    // endpoint sits at the top of the same group.
+                    VStack(alignment: .leading, spacing: 12) {
+                        if provider == .custom {
+                            TextField("엔드포인트 URL:", text: $customEndpoint, prompt: Text("https://…/chat/completions"))
+                                .onChange(of: customEndpoint) { _, newValue in
+                                    RefinementSettings.customEndpoint = newValue
+                                }
                         }
+                        if provider.requiresAPIKey {
+                            // Compact key UX: no always-visible masked field.
+                            if editingKey || apiKey.trimmingCharacters(in: .whitespaces).isEmpty {
+                                HStack {
+                                    SecureField("API 키 입력", text: $apiKey)
+                                        .onChange(of: apiKey) { _, newValue in
+                                            RefinementSettings.setAPIKey(newValue, for: provider)
+                                            connTestState = .idle
+                                        }
+                                    Button("완료") { editingKey = false }
+                                        .disabled(apiKey.trimmingCharacters(in: .whitespaces).isEmpty)
+                                }
+                            } else {
+                                HStack {
+                                    Label("API 키 등록 완료", systemImage: "checkmark.seal.fill")
+                                        .font(.callout).foregroundStyle(.green)
+                                    Spacer()
+                                    Button("변경") { editingKey = true }
+                                        .font(.footnote)
+                                }
+                            }
+                            HStack(spacing: 12) {
+                                Button {
+                                    Task { await runConnectionTest() }
+                                } label: {
+                                    if connTestState == .testing {
+                                        HStack(spacing: 5) { ProgressView().controlSize(.small); Text("확인 중") }
+                                    } else {
+                                        Text("연결 테스트")
+                                    }
+                                }
+                                .controlSize(.small)
+                                .disabled(connTestState == .testing || apiKey.trimmingCharacters(in: .whitespaces).isEmpty)
+                                if let usageURL = provider.usageDashboardURL {
+                                    HoverLink(title: "사용량 확인", systemImage: "chart.bar", url: usageURL,
+                                              help: "남은 무료 할당량은 API로 조회 불가 — 공식 대시보드에서 확인")
+                                }
+                                Spacer()
+                                connTestFeedback
+                            }
+                        } else {
+                            Text("Ollama 로컬 서버는 API 키가 필요 없습니다 (localhost에서 직접 실행 중이어야 합니다).")
+                                .font(.footnote).foregroundStyle(.secondary)
+                        }
+                    }
                 }
             } header: {
                 Text("텍스트 정제")
@@ -199,12 +333,80 @@ struct SettingsView: View {
         .scrollContentBackground(embedded ? .hidden : .automatic)
         .tint(Brand.accent)
         .frame(
-            width: embedded ? nil : 460,
-            height: embedded ? nil : (hotkeyMode == .combination ? 700 : 680)
+            width: embedded ? nil : 480,
+            height: embedded ? nil : (hotkeyMode == .combination ? 760 : 740)
         )
         .onAppear {
             apiKey = RefinementSettings.apiKey(for: provider) ?? ""
         }
+    }
+
+    /// Curated model choices for the picker (id + feature badges), with the
+    /// currently-set model guaranteed present so it stays selected even if not
+    /// in the curated list.
+    private var modelChoices: [(id: String, badges: [String])] {
+        var choices = provider.curatedModels
+        if !model.isEmpty, !choices.contains(where: { $0.id == model }) {
+            choices.insert((id: model, badges: ["현재 설정"]), at: 0)
+        }
+        return choices
+    }
+
+    /// Feature badges for the currently-selected model (shown under the picker).
+    private var selectedModelBadges: [String] {
+        modelChoices.first(where: { $0.id == model })?.badges ?? []
+    }
+
+    @ViewBuilder
+    private var connTestFeedback: some View {
+        switch connTestState {
+        case .idle, .testing:
+            EmptyView()
+        case .success:
+            Label("인증되었습니다", systemImage: "checkmark.circle.fill")
+                .font(.footnote).foregroundStyle(.green)
+        case .failure(let msg):
+            Label(msg, systemImage: "exclamationmark.triangle.fill")
+                .font(.footnote).foregroundStyle(.orange).lineLimit(2)
+        }
+    }
+
+
+    /// Feature 1: a minimal real refine call to validate the current
+    /// key/endpoint/model right now (mirrors the onboarding connection test).
+    private func runConnectionTest() async {
+        connTestState = .testing
+        let endpointString = RefinementSettings.endpoint(for: provider)
+        guard let url = URL(string: endpointString), !endpointString.isEmpty else {
+            connTestState = .failure("엔드포인트 설정 오류"); return
+        }
+        let config = OpenAICompatibleRefinerConfig(
+            endpoint: url, model: model,
+            apiKey: apiKey.isEmpty ? nil : apiKey, timeout: 12, style: .polish
+        )
+        do {
+            _ = try await withSettingsTimeout(12) {
+                try await OpenAICompatibleRefiner(config: config).refine("연결 테스트입니다.", context: RefinementContext())
+            }
+            connTestState = .success
+        } catch {
+            connTestState = .failure(describeConnError(error))
+        }
+    }
+
+    private func describeConnError(_ error: Error) -> String {
+        if let e = error as? TextRefinerError {
+            switch e {
+            case .timedOut: return "시간 초과 — 네트워크를 확인하세요."
+            case .unavailable: return "정제를 사용할 수 없습니다."
+            case .requestFailed(let m):
+                if m.contains("401") || m.contains("403") { return "API 키가 올바르지 않습니다." }
+                if m.contains("404") { return "모델을 찾을 수 없습니다 (모델명 확인)." }
+                if m.contains("429") { return "요청 한도 초과 — 잠시 후 다시 시도." }
+                return String(m.prefix(80))
+            }
+        }
+        return "연결 실패: \(String(describing: error).prefix(60))"
     }
 
     // Real refiner outputs (HwhisperEval --refine-compare, gemini-3.1-flash-lite)

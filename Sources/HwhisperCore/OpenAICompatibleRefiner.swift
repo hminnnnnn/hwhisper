@@ -43,6 +43,41 @@ public enum RefinerProvider: String, Sendable, CaseIterable {
     public var requiresAPIKey: Bool {
         self != .ollama
     }
+
+    /// Official usage/quota dashboard. There is NO API to read remaining quota
+    /// with just an API key (confirmed: no rate-limit headers on success, no
+    /// key-only usage endpoint), so Settings links here for the real numbers.
+    public var usageDashboardURL: URL? {
+        switch self {
+        case .gemini: URL(string: "https://aistudio.google.com/app/apikey")
+        case .groq: URL(string: "https://console.groq.com/settings/limits")
+        case .ollama, .custom: nil
+        }
+    }
+
+    /// Curated model choices for the picker — a short, hand-vetted list (not the
+    /// 30+ raw `/models` dump, which read as noise) with a one-line note each so
+    /// the user can pick. Chosen for the refinement task (fast + clean + free
+    /// tier); latency/quality measured empirically (dev model bake-off). Users
+    /// who want anything else use the "직접 입력" escape hatch.
+    public var curatedModels: [(id: String, badges: [String])] {
+        switch self {
+        case .gemini: [
+            ("gemini-3.1-flash-lite", ["무료 권장", "빠름", "안정", "기본"]),
+            ("gemini-3-flash-preview", ["더 빠름", "최신", "프리뷰"]),
+            ("gemini-2.5-flash", ["가장 정교", "조금 느림"]),
+        ]
+        case .groq: [
+            ("llama-3.3-70b-versatile", ["고품질", "범용"]),
+            ("llama-3.1-8b-instant", ["매우 빠름", "경량"]),
+        ]
+        case .ollama: [
+            ("qwen2.5:3b", ["경량", "로컬", "무료"]),
+            ("llama3.2:3b", ["경량", "로컬", "무료"]),
+        ]
+        case .custom: []
+        }
+    }
 }
 
 /// 정제 강도: `.polish`는 필러 제거/문장부호 교정 등 기존 동작만 하고,

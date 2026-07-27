@@ -8,6 +8,10 @@ enum RecordingIndicatorState: Equatable {
     /// LLM text-refinement pass in flight (§4 M2) — distinct from
     /// `.transcribing` so the user can tell STT and refinement apart.
     case refining
+    /// Refinement still running past the "taking a while" threshold — same
+    /// spinner as `.refining` plus an explanatory second line so a long refine
+    /// (large input / slow network / retry) doesn't look stuck.
+    case refiningSlow(String)
     /// One-time heavy setup in flight (WhisperKit model download/load on
     /// macOS < 26) — a spinner plus an explanatory line so a multi-minute
     /// first-run load doesn't look like a hang.
@@ -175,6 +179,7 @@ private struct RecordingIndicatorView: View {
         case .failure(let reason), .copiedToClipboard(let reason): reason
         case .warning(_, let message): message
         case .preparing(let message): message
+        case .refiningSlow(let message): message
         default: nil
         }
     }
@@ -199,7 +204,7 @@ private struct RecordingIndicatorView: View {
                         isPulsing = true
                     }
                 }
-        case .transcribing, .refining, .preparing:
+        case .transcribing, .refining, .refiningSlow, .preparing:
             ProgressView()
                 .controlSize(.small)
                 .tint(.white)
@@ -239,7 +244,7 @@ private struct RecordingIndicatorView: View {
         switch state {
         case .listening: "듣는 중…"
         case .transcribing: "변환 중…"
-        case .refining: "다듬는 중…"
+        case .refining, .refiningSlow: "다듬는 중…"
         case .success: "완료"
         case .failure: "실패"
         case .preparing: "준비 중…"
@@ -388,6 +393,19 @@ final class RecordingIndicatorController {
     /// different stages of the pipeline.
     func showRefining() {
         present(.refining)
+    }
+
+    /// Refinement is running past the "taking a while" threshold — keep the
+    /// spinner but add an explanatory line so the user knows it's still working
+    /// (not stuck) and why. Only swaps in if we're still on a refining state.
+    func showRefiningSlow(_ message: String) {
+        guard state == .refining || isRefiningSlow else { return }
+        present(.refiningSlow(message))
+    }
+
+    private var isRefiningSlow: Bool {
+        if case .refiningSlow = state { return true }
+        return false
     }
 
     /// One-time heavy setup (WhisperKit model download/load). No auto-hide —

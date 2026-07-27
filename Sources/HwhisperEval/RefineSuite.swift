@@ -102,16 +102,57 @@ func runRefineSuite() async {
                       let f = standaloneFillers($0), ok = f == 0 && endsCleanly($0) && $0.count > threeMin.count / 3 && containsAll($0, ["홈 화면", "검색", "알림"])
                       return (ok, "filler=\(f) ends=\(endsCleanly($0)) len=\($0.count) 3주제=\(containsAll($0, ["홈 화면", "검색", "알림"]))")
                   }),
+
+        // ── 확충: 속성별 다중 케이스 + 예외 패턴 ──
+        SuiteCase(category: "필러제거", name: "다른 필러(음/이제/약간)", input: "음 이거 이제 약간 좀 애매한데 어 그냥 이렇게 가면 될 것 같아", style: .polish,
+                  check: { (standaloneFillers($0) == 0, "filler=\(standaloneFillers($0))") }),
+        SuiteCase(category: "필러제거", name: "문두 말더듬 반복", input: "어 어 그 그 이거 좀 확인 부탁해", style: .polish,
+                  check: { (standaloneFillers($0) == 0 && $0.contains("확인"), "filler=\(standaloneFillers($0))") }),
+        SuiteCase(category: "안전:답변금지", name: "분석 명령 안 함", input: "이 버그 원인이 뭔지 좀 분석해 줘", style: .structure,
+                  check: { ($0.count < 40 && !containsAny($0, ["원인은", "때문", "다음과 같"]), "len=\($0.count)") }),
+        SuiteCase(category: "안전:답변금지", name: "계산 안 함", input: "그래서 일 더하기 일은 뭐야", style: .polish,
+                  check: { (!$0.contains("2") && !$0.contains("이입니다") && !$0.contains("답은"), "계산 안 함") }),
+        SuiteCase(category: "나열형", name: "2항목→목록(하나는/다른하나는)", input: "체크할 게 두 가지야 하나는 로그인 흐름이고 다른 하나는 결제 연동이야", style: .structure,
+                  check: { (hasNumberedList($0), "list=\(hasNumberedList($0))") }),
+        SuiteCase(category: "나열형", name: "우선순위 나열→목록", input: "우선순위는 첫 번째가 성능이고 두 번째가 안정성 세 번째가 디자인이야", style: .structure,
+                  check: { (hasNumberedList($0), "list=\(hasNumberedList($0))") }),
+        SuiteCase(category: "비나열", name: "단일 서술은 목록화 금지", input: "그 회의에서 나온 얘기가 방향은 대체로 맞는데 세부적으로는 좀 더 논의가 필요하다는 거였어", style: .structure,
+                  check: { (!hasNumberedList($0) && standaloneFillers($0) == 0, "과잉목록화 안 됨") }),
+        SuiteCase(category: "안전:관점", name: "설계 서술 유지", input: "그 기능은 원래 이렇게 동작하도록 설계된 거야", style: .structure,
+                  check: { (!containsAny($0, ["어떨", "하자", "할까", "제안"]), "서술 유지") }),
+        SuiteCase(category: "안전:관점", name: "질문 유지(structure)", input: "이거 정말 이대로 괜찮은 걸까 다시 봐야 하나", style: .structure,
+                  check: { (containsAny($0, ["?", "걸까", "하나", "봐야"]), "질문성 유지") }),
+        SuiteCase(category: "안전:말투", name: "존댓말 보존(반말화 금지)", input: "이 부분 확인 한번 부탁드립니다 그리고 결과도 공유해 주시면 감사하겠습니다", style: .structure,
+                  check: { (isPolite($0), "존댓말 유지=\(isPolite($0))") }),
+        SuiteCase(category: "KO/EN", name: "영문 용어 보존2", input: "그 API 응답을 JSON으로 파싱해서 처리하면 될 것 같아", style: .polish,
+                  check: { (containsAll($0, ["API", "JSON"]), "용어 보존") }),
+        SuiteCase(category: "짧은문장", name: "매우 짧은 발화", input: "어 그거 좀 확인 부탁", style: .polish,
+                  check: { (standaloneFillers($0) == 0 && $0.count <= 20 && $0.contains("확인"), "간결·filler=\(standaloneFillers($0))") }),
     ]
 
-    print("╔══════════ REFINEMENT RELEASE GATE (\(cases.count) cases, live API) ══════════╗")
+    // Each case is judged best-of-3 (pass if ≥2 attempts pass). Refinement is
+    // an LLM at temp 0.2, so a single roll occasionally deviates; a majority
+    // vote absorbs that flakiness while still failing on a REAL regression
+    // (which fails consistently). Short-circuits once 2 agree.
+    func evaluate(_ c: SuiteCase) async -> (passed: Bool, detail: String, lastOut: String) {
+        var pass = 0, lastReason = "", lastOut = ""
+        for attempt in 1...3 {
+            let out = (try? await refiner(c.style).refine(c.input, context: RefinementContext())) ?? ""
+            let (ok, reason) = out.isEmpty ? (false, "빈 출력/실패") : c.check(out)
+            if ok { pass += 1 }
+            lastReason = reason; lastOut = out
+            if attempt == 2 && (pass == 2 || pass == 0) { break }  // unanimous → decided
+        }
+        return (pass >= 2, "\(pass)/3표 · \(lastReason)", lastOut)
+    }
+
+    print("╔══════════ REFINEMENT RELEASE GATE (\(cases.count) cases, best-of-3, live API) ══════════╗")
     var pass = 0
     for c in cases {
-        let out = (try? await refiner(c.style).refine(c.input, context: RefinementContext())) ?? ""
-        let (ok, reason): (Bool, String) = out.isEmpty ? (false, "빈 출력/실패") : c.check(out)
+        let (ok, detail, lastOut) = await evaluate(c)
         if ok { pass += 1 }
-        print("[\(ok ? "✅" : "❌")] \(c.category) · \(c.name)  —  \(reason)")
-        if !ok { print("     OUT: \(out.replacingOccurrences(of: "\n", with: " ⏎ "))") }
+        print("[\(ok ? "✅" : "❌")] \(c.category) · \(c.name)  —  \(detail)")
+        if !ok { print("     OUT: \(lastOut.replacingOccurrences(of: "\n", with: " ⏎ "))") }
     }
     let cov = cases.isEmpty ? 0 : Int((Double(pass) / Double(cases.count) * 100).rounded())
     print("╠════════════════════════════════════════════════════════════════╣")

@@ -387,6 +387,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if arguments.contains("--test-warning") {
             showNoSpeechWarning()
         }
+        // Test-only: renders the "refinement is taking a while" pill (the >4s
+        // slow-progress notice) without a real slow refine.
+        if arguments.contains("--test-refining-slow") {
+            recordingIndicator.showRefining()
+            recordingIndicator.showRefiningSlow("입력이 많아 시간이 소요되고 있어요")
+        }
         // Test-only: renders the listening pill in its guided-duration final
         // window (the "N초 후 음성 입력이 종료됩니다" countdown notice) so the
         // second-line layout/color can be checked without waiting 3 minutes.
@@ -974,31 +980,58 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         let start = Date()
-        do {
-            let config = OpenAICompatibleRefinerConfig(
-                endpoint: endpointURL,
-                model: model,
-                apiKey: apiKey.isEmpty ? nil : apiKey,
-                timeout: timeout,
-                style: style
-            )
-            let refiner = OpenAICompatibleRefiner(config: config)
-            // Long input is refined as ceil(chunks / concurrency) rounds of
-            // parallel calls (see OpenAICompatibleRefiner.refineChunked). Give
-            // the outer bound that many timeouts of room so it doesn't kill a
-            // legitimately long refinement; wall-clock stays ≈ that many calls.
-            let chunkCount = OpenAICompatibleRefiner.chunkCount(for: rawText)
-            let rounds = max(1, Int(ceil(Double(chunkCount) / Double(OpenAICompatibleRefiner.chunkConcurrency))))
-            let effectiveTimeout = min(45, timeout * Double(rounds))
-            let refined = try await withTimeout(effectiveTimeout) {
-                try await refiner.refine(rawText, context: context)
+        let config = OpenAICompatibleRefinerConfig(
+            endpoint: endpointURL,
+            model: model,
+            apiKey: apiKey.isEmpty ? nil : apiKey,
+            timeout: timeout,
+            style: style
+        )
+        let refiner = OpenAICompatibleRefiner(config: config)
+        // Long input is refined as ceil(chunks / concurrency) rounds of parallel
+        // calls (see OpenAICompatibleRefiner.refineChunked); give the per-attempt
+        // bound that many timeouts so a legitimately long refine isn't killed.
+        let chunkCount = OpenAICompatibleRefiner.chunkCount(for: rawText)
+        let rounds = max(1, Int(ceil(Double(chunkCount) / Double(OpenAICompatibleRefiner.chunkConcurrency))))
+        let effectiveTimeout = min(45, timeout * Double(rounds))
+
+        // Slow-progress notice: if refinement is still running after 6s, tell the
+        // user it's taking a while so the "다듬는 중…" pill doesn't look stuck
+        // (user request). Wording avoids "느려요" (devalues the service) —
+        // frames it as a lot of input taking time. Cancelled when refine resolves.
+        let slowNotice = Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: 6_000_000_000)
+            self?.recordingIndicator.showRefiningSlow("입력이 많아 시간이 소요되고 있어요")
+        }
+
+        // Auto-retry up to 3 times on any failure/timeout before falling back to
+        // raw, so the user only has to register a key — transient errors, rate
+        // limits, and slow calls recover on their own (user request).
+        let maxAttempts = 3
+        var refined: String?
+        for attempt in 1...maxAttempts {
+            do {
+                refined = try await withTimeout(effectiveTimeout) {
+                    try await refiner.refine(rawText, context: context)
+                }
+                break
+            } catch {
+                let elapsed = Date().timeIntervalSince(start)
+                if attempt < maxAttempts {
+                    HwhisperLog.log("refinement attempt \(attempt)/\(maxAttempts) failed (elapsed=\(String(format: "%.2f", elapsed))s): \(error) — retrying")
+                    recordingIndicator.showRefiningSlow("정제 재시도 중… (\(attempt + 1)/\(maxAttempts))")
+                } else {
+                    HwhisperLog.log("refinement failed after \(maxAttempts) attempts, falling back to raw text (provider=\(provider.rawValue), model=\(model), elapsed=\(String(format: "%.2f", elapsed))s): \(error)")
+                }
             }
+        }
+        slowNotice.cancel()
+
+        if let refined {
             let elapsed = Date().timeIntervalSince(start)
             HwhisperLog.log("refinement succeeded (provider=\(provider.rawValue), model=\(model), elapsed=\(String(format: "%.2f", elapsed))s)")
             await insertAndReport(text: refined, snapshot: snapshot, rawText: rawText, speechSeconds: speechSeconds)
-        } catch {
-            let elapsed = Date().timeIntervalSince(start)
-            HwhisperLog.log("refinement failed, falling back to raw text (provider=\(provider.rawValue), model=\(model), elapsed=\(String(format: "%.2f", elapsed))s): \(error)")
+        } else {
             await insertAndReport(text: rawText, snapshot: snapshot, speechSeconds: speechSeconds)
         }
     }

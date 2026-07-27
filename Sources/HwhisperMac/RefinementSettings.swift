@@ -14,7 +14,12 @@ enum RefinementSettings {
     private static let customEndpointKey = "refinementCustomEndpoint"
     private static let timeoutKey = "refinementTimeout"
     private static let styleKey = "refinementStyle"
-    static let defaultTimeout: TimeInterval = 8
+    // 8s was too tight: normal refines take 2–5s, but an occasional slow/long
+    // Gemini call crossed 8s and fell back to RAW (unrefined, filler-laden text
+    // inserted — real user complaint, confirmed by "…elapsed=8.07s: timedOut"
+    // in the log). 20s waits out the slow tail so refinement actually lands;
+    // normal calls are unaffected. Adjustable in Settings.
+    static let defaultTimeout: TimeInterval = 20
 
     static var isEnabled: Bool {
         get { UserDefaults.standard.bool(forKey: enabledKey) }
