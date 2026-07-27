@@ -453,6 +453,9 @@ if #available(macOS 26.0, *) {
 engines.append(("WhisperKitRecognizer (B2, large-v3-turbo)", WhisperKitRecognizer()))
 
 let arguments = CommandLine.arguments
+if arguments.contains("--refine-suite") {
+    await runRefineSuite()  // exits 0 (100% coverage) or non-zero — release gate
+}
 if let probeFlagIndex = arguments.firstIndex(of: "--probe") {
     guard probeFlagIndex + 1 < arguments.count else {
         print("usage: HwhisperEval --probe <fixtureID>  (e.g. --probe ko-01)")
