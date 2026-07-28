@@ -25,6 +25,15 @@ struct OnboardingView: View {
     @State private var page = 0
     private let totalPages = 5
 
+    /// `initialPage` lets the `--onboarding-page N` test hook jump straight to
+    /// a page for screenshot verification (e.g. the finish page's theme toggle)
+    /// without synthesizing clicks through the wizard.
+    init(initialPage: Int = 0, onFinish: @escaping () -> Void, onSkip: @escaping () -> Void) {
+        self.onFinish = onFinish
+        self.onSkip = onSkip
+        _page = State(initialValue: min(max(initialPage, 0), totalPages - 1))
+    }
+
     var body: some View {
         VStack(spacing: 0) {
             header
@@ -46,7 +55,9 @@ struct OnboardingView: View {
         .frame(width: 560, height: 640)
         .background(Brand.inkDeep)
         .tint(Brand.accent)
-        .preferredColorScheme(.dark)
+        // 화면 테마(AppTheme)를 따른다 — 색은 모두 적응형(Brand.inkText 등)이고
+        // 창 appearance가 테마를 반영하므로, 완료 페이지의 테마 토글이 온보딩
+        // 자체도 즉시 그 테마로 다시 그린다. (예전엔 여기서 .dark 고정)
     }
 
     private var header: some View {
@@ -55,7 +66,7 @@ struct OnboardingView: View {
                 BrandGlyph(height: 16)
                 Text("hwhisper 시작하기")
                     .font(.system(size: 13, weight: .semibold, design: .rounded))
-                    .foregroundStyle(.white.opacity(0.85))
+                    .foregroundStyle(Brand.inkText.opacity(0.85))
             }
             Spacer()
             if page < totalPages - 1 {
@@ -87,8 +98,7 @@ struct OnboardingView: View {
                 Spacer()
                 if page < totalPages - 1 {
                     Button("다음") { page += 1 }
-                        .buttonStyle(.borderedProminent)
-                        .tint(Brand.accent)
+                        .buttonStyle(BrandProminentButtonStyle())
                 }
             }
             .padding(.horizontal, 24)
@@ -107,7 +117,7 @@ private struct OnboardingWelcomePage: View {
             Text("hwhisper에 오신 것을\n환영합니다")
                 .multilineTextAlignment(.center)
                 .font(.system(size: 26, weight: .bold, design: .rounded))
-                .foregroundStyle(.white)
+                .foregroundStyle(Brand.inkText)
             Text("말하면 커서에 바로 입력되고, 음성은 기기를 떠나지 않습니다.")
                 .font(.title3)
                 .foregroundStyle(.secondary)
@@ -134,7 +144,7 @@ private struct OnboardingPermissionsPage: View {
         VStack(alignment: .leading, spacing: 18) {
             Text("권한 허용")
                 .font(.title2.bold())
-                .foregroundStyle(.white)
+                .foregroundStyle(Brand.inkText)
             Text("딕테이션에는 마이크와 손쉬운 사용 권한이 필요합니다. 지금 허용하지 않아도 나중에 설정에서 다시 할 수 있습니다.")
                 .font(.callout)
                 .foregroundStyle(.secondary)
@@ -197,7 +207,7 @@ private struct OnboardingPermissionsPage: View {
             VStack(alignment: .leading, spacing: 2) {
                 Text("\(title): \(statusText)")
                     .font(.callout.weight(.semibold))
-                    .foregroundStyle(.white)
+                    .foregroundStyle(Brand.inkText)
                 Text(detail)
                     .font(.caption)
                     .foregroundStyle(.secondary)
@@ -226,7 +236,7 @@ private struct OnboardingHotkeyPage: View {
         VStack(alignment: .leading, spacing: 18) {
             Text("단축키 선택")
                 .font(.title2.bold())
-                .foregroundStyle(.white)
+                .foregroundStyle(Brand.inkText)
             Text("탭 한 번으로 녹음을 시작/종료합니다. 나중에 설정에서 언제든 바꿀 수 있습니다.")
                 .font(.callout)
                 .foregroundStyle(.secondary)
@@ -253,7 +263,7 @@ private struct OnboardingHotkeyPage: View {
                 VStack(alignment: .leading, spacing: 2) {
                     Text(mode.displayName)
                         .font(.callout.weight(.semibold))
-                        .foregroundStyle(.white)
+                        .foregroundStyle(Brand.inkText)
                     Text(hotkeyDetail(mode))
                         .font(.caption)
                         .foregroundStyle(.secondary)
@@ -273,7 +283,7 @@ private struct OnboardingHotkeyPage: View {
         case .singleKeyRightCommand: "우측 ⌘ 키를 짧게 탭합니다. 조합키(예: 우측⌘+C)는 무시됩니다."
         case .singleKeyRightOption: "우측 ⌥ 키를 짧게 탭합니다."
         case .singleKeyFn: "fn(🌐) 키를 짧게 탭합니다. 시스템 설정에서 fn 키 기본 동작을 바꿔야 충돌하지 않습니다."
-        case .singleKeyCustom: "원하는 보조키(⌘/⌥/⌃/⇧ 좌·우, fn)를 직접 지정합니다 (설정에서 지정)."
+        case .singleKeyCustom: "원하는 보조키(⌘/⌥/⌃/⇧ 좌·우, fn)나 함수키를 직접 지정합니다 (설정에서 지정)."
         }
     }
 }
@@ -308,7 +318,7 @@ private struct OnboardingRefinementPage: View {
             VStack(alignment: .leading, spacing: 14) {
                 Text("정제 설정")
                     .font(.title2.bold())
-                    .foregroundStyle(.white)
+                    .foregroundStyle(Brand.inkText)
                 Text("받아쓴 텍스트를 다듬을지 선택합니다. 음성은 어떤 경우에도 외부로 전송되지 않습니다 — 정제를 켜면 \"정제된 텍스트만\" 선택한 프로바이더로 전송됩니다.")
                     .font(.callout)
                     .foregroundStyle(.secondary)
@@ -450,7 +460,7 @@ private struct OnboardingRefinementPage: View {
                 VStack(alignment: .leading, spacing: 3) {
                     Text(title)
                         .font(.callout.weight(.semibold))
-                        .foregroundStyle(.white)
+                        .foregroundStyle(Brand.inkText)
                     Text(subtitle)
                         .font(.caption)
                         .foregroundStyle(.secondary)
@@ -465,7 +475,7 @@ private struct OnboardingRefinementPage: View {
         VStack(alignment: .leading, spacing: 8) {
             Text("정제 전/후 예시")
                 .font(.caption.weight(.semibold))
-                .foregroundStyle(.white.opacity(0.85))
+                .foregroundStyle(Brand.inkText.opacity(0.85))
             VStack(alignment: .leading, spacing: 6) {
                 HStack(alignment: .top, spacing: 6) {
                     Text("전").font(.caption2).foregroundStyle(.secondary).frame(width: 16, alignment: .leading)
@@ -477,7 +487,7 @@ private struct OnboardingRefinementPage: View {
                     Text("후").font(.caption2).foregroundStyle(Brand.accentLight).frame(width: 16, alignment: .leading)
                     Text("오늘 회의는 3시에 하고, 자료는 제가 준비할게요.")
                         .font(.caption)
-                        .foregroundStyle(.white.opacity(0.92))
+                        .foregroundStyle(Brand.inkText.opacity(0.92))
                 }
             }
             .padding(10)
@@ -584,6 +594,12 @@ private struct OnboardingRefinementPage: View {
                 if message.contains("401") || message.contains("403") {
                     return "API 키가 올바르지 않습니다."
                 }
+                if message.contains("404") {
+                    return "모델을 찾을 수 없습니다 — 프로바이더 설정을 확인하세요."
+                }
+                if message.contains("429") {
+                    return "요청 한도를 초과했습니다 — 잠시 후 다시 시도하세요."
+                }
                 return String(message.prefix(120))
             }
         }
@@ -618,6 +634,8 @@ private func withOnboardingTimeout<T: Sendable>(
 private struct OnboardingFinishPage: View {
     let onOpenHome: () -> Void
 
+    @State private var themeMode: ThemeMode = AppTheme.current
+
     var body: some View {
         VStack(spacing: 20) {
             Spacer()
@@ -626,15 +644,35 @@ private struct OnboardingFinishPage: View {
                 .foregroundStyle(Brand.accent)
             Text("설정이 끝났습니다")
                 .font(.title2.bold())
-                .foregroundStyle(.white)
+                .foregroundStyle(Brand.inkText)
             VStack(spacing: 6) {
                 Text("단축키: \(HotkeyMode.current.displayName)")
                     .font(.callout)
-                    .foregroundStyle(.white.opacity(0.9))
+                    .foregroundStyle(Brand.inkText.opacity(0.9))
                 Text(refinementSummary)
                     .font(.callout)
                     .foregroundStyle(.secondary)
             }
+
+            // 화면 테마 선택 — 마지막 단계에서 노출해 첫 사용부터 취향대로.
+            // 선택 즉시 AppTheme가 온보딩 창을 포함한 모든 창을 다시 그린다.
+            VStack(spacing: 8) {
+                Text("화면 테마")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(Brand.inkText.opacity(0.75))
+                Picker("화면 테마", selection: $themeMode) {
+                    ForEach(ThemeMode.allCases, id: \.self) { mode in
+                        Text(mode.displayName).tag(mode)
+                    }
+                }
+                .pickerStyle(.segmented)
+                .labelsHidden()
+                .frame(width: 220)
+                .onChange(of: themeMode) { _, newValue in
+                    AppTheme.current = newValue
+                }
+            }
+
             Text("탭 한 번으로 녹음을 시작/종료합니다. 나중에 설정에서 언제든 바꿀 수 있습니다.")
                 .font(.caption)
                 .foregroundStyle(.tertiary)
@@ -642,9 +680,7 @@ private struct OnboardingFinishPage: View {
                 .frame(maxWidth: 360)
             Spacer()
             Button("홈 화면 열기", action: onOpenHome)
-                .buttonStyle(.borderedProminent)
-                .tint(Brand.accent)
-                .controlSize(.large)
+                .buttonStyle(BrandProminentButtonStyle(large: true))
             Spacer()
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -676,8 +712,9 @@ final class OnboardingWindowController: NSObject, NSWindowDelegate {
 
     /// `activate: false` shows the window without stealing focus — used by
     /// the `--no-activate` test hook (mirrors `MainWindowController.show`).
-    func show(activate: Bool = true) {
+    func show(activate: Bool = true, initialPage: Int = 0) {
         let hostingView = NSHostingView(rootView: OnboardingView(
+            initialPage: initialPage,
             onFinish: { [weak self] in self?.complete(openHome: true) },
             onSkip: { [weak self] in self?.complete(openHome: false) }
         ))
@@ -695,7 +732,7 @@ final class OnboardingWindowController: NSObject, NSWindowDelegate {
             defer: false
         )
         newWindow.title = "hwhisper 시작하기"
-        newWindow.appearance = NSAppearance(named: .darkAqua)
+        newWindow.appearance = AppTheme.current.nsAppearance
         newWindow.backgroundColor = Brand.inkDeepNSColor
         newWindow.contentView = hostingView
         newWindow.isReleasedWhenClosed = false

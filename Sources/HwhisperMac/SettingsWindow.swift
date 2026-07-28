@@ -64,6 +64,7 @@ struct SettingsView: View {
     /// and sizes itself) rather than the fixed-size standalone window.
     var embedded = false
 
+    @State private var themeMode: ThemeMode = AppTheme.current
     @State private var hotkeyMode: HotkeyMode = .current
     @State private var languageMode: RecognitionLanguageMode = .current
     @State private var soundFeedbackEnabled = SoundFeedbackSettings.isEnabled
@@ -85,6 +86,22 @@ struct SettingsView: View {
 
     var body: some View {
         Form {
+            Section {
+                Picker("화면 테마:", selection: $themeMode) {
+                    ForEach(ThemeMode.allCases, id: \.self) { mode in
+                        Text(mode.displayName).tag(mode)
+                    }
+                }
+                .pickerStyle(.segmented)
+                .onChange(of: themeMode) { _, newValue in
+                    AppTheme.current = newValue
+                }
+            } footer: {
+                Text("라이트 모드는 밝은 청자 종이 배경에 어두운 글씨로, 다크 모드는 먹빛 배경에 밝은 글씨로 표시합니다. 변경하면 열려 있는 모든 창에 바로 적용됩니다.")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+            }
+
             Section {
                 Picker("단축키 방식:", selection: $hotkeyMode) {
                     ForEach(HotkeyMode.allCases, id: \.self) { mode in
@@ -126,7 +143,7 @@ struct SettingsView: View {
                         // tildes in "F1~F20"/"F13~F19" would otherwise trigger
                         // GFM strikethrough (single ~ is enough), striking out
                         // everything between them. verbatim disables Markdown.
-                        Text(verbatim: "원하는 키를 직접 지정합니다 — 보조키(⌘/⌥/⌃/⇧ 좌·우, fn)와 함수키(F1~F20, 외장 키보드의 F13~F19 포함)를 쓸 수 있습니다. 일반 문자·숫자·방향키·Return 등은 타이핑/이동과 충돌해 지원하지 않습니다(선택 시 안내가 표시됩니다). 지정한 키를 짧게 탭하면 녹음이 시작/종료됩니다.")
+                        Text(verbatim: "원하는 키를 직접 지정합니다 — 보조키(⌘/⌥/⌃/⇧ 좌·우, fn)와 함수키를 쓸 수 있습니다. 일반 문자·숫자·방향키·Return 등은 타이핑/이동과 충돌해 지원하지 않습니다(선택 시 안내가 표시됩니다). 지정한 키를 짧게 탭하면 녹음이 시작/종료됩니다.")
                     }
                 }
                 .font(.footnote)
@@ -636,6 +653,8 @@ final class SettingsWindowController {
             defer: false
         )
         newWindow.title = "hwhisper 설정"
+        newWindow.appearance = AppTheme.current.nsAppearance
+        newWindow.backgroundColor = Brand.inkDeepNSColor
         newWindow.contentView = hostingView
         newWindow.isReleasedWhenClosed = false
         newWindow.center()

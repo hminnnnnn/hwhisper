@@ -82,7 +82,7 @@ struct MainView: View {
                     BrandGlyph(height: 17)
                     Text("hwhisper")
                         .font(.system(size: 15, weight: .bold, design: .rounded))
-                        .foregroundStyle(.white.opacity(0.92))
+                        .foregroundStyle(Brand.inkText.opacity(0.92))
                 }
                 .padding(.horizontal, 18)
                 .padding(.top, 14)
@@ -559,11 +559,10 @@ final class MainWindowController: NSObject, NSWindowDelegate {
             defer: false
         )
         newWindow.title = "hwhisper"
-        // 브랜드 외형: 시스템 라이트/다크와 무관하게 먹(ink) 세계로 고정 —
-        // 브랜드 보드의 단일 잉크 그라운드 결정을 창 전체(타이틀바 포함)에
-        // 적용한다. 타이틀바는 투명하게 눌러 사이드바/콘텐츠 잉크가 끝까지
-        // 차오르게 한다.
-        newWindow.appearance = NSAppearance(named: .darkAqua)
+        // 브랜드 외형: 사용자가 고른 화면 테마(다크=먹 세계 / 라이트=청자 종이)를
+        // 창 전체(타이틀바 포함)에 적용한다. 타이틀바는 투명하게 눌러 사이드바/
+        // 콘텐츠 그라운드가 끝까지 차오르게 한다.
+        newWindow.appearance = AppTheme.current.nsAppearance
         newWindow.backgroundColor = Brand.inkDeepNSColor
         newWindow.titlebarAppearsTransparent = true
         newWindow.contentView = hostingView

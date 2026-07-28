@@ -113,7 +113,7 @@ private struct RecordingIndicatorView: View {
                     Text(statusText)
                         .font(.system(size: 14, weight: .semibold))
                         .tracking(-0.2)
-                        .foregroundStyle(.white.opacity(0.95))
+                        .foregroundStyle(Brand.inkText.opacity(0.95))
                         .fixedSize()
                     if state == .listening {
                         waveformMeter
@@ -121,7 +121,7 @@ private struct RecordingIndicatorView: View {
                             Button(action: onCancel) {
                                 Image(systemName: "xmark.circle.fill")
                                     .font(.system(size: 15))
-                                    .foregroundStyle(.white.opacity(0.55))
+                                    .foregroundStyle(Brand.inkText.opacity(0.55))
                             }
                             .buttonStyle(.plain)
                             .help("입력 취소")
@@ -133,7 +133,7 @@ private struct RecordingIndicatorView: View {
                     Text(reason)
                         .font(.system(size: 12.5, weight: .regular))
                         .tracking(-0.1)
-                        .foregroundStyle(.white.opacity(0.72))
+                        .foregroundStyle(Brand.inkText.opacity(0.72))
                         .lineSpacing(2)
                         .lineLimit(3)
                         .fixedSize(horizontal: false, vertical: true)
@@ -147,7 +147,7 @@ private struct RecordingIndicatorView: View {
                         .font(.system(size: 12, weight: .medium))
                         .tracking(-0.1)
                         .monospacedDigit()
-                        .foregroundStyle(Color(red: 0.95, green: 0.75, blue: 0.35))
+                        .foregroundStyle(Brand.warningAmber)
                         .fixedSize()
                 }
             }
@@ -162,7 +162,7 @@ private struct RecordingIndicatorView: View {
             // Sub-1px hairline "edge catching light" highlight — the detail
             // that reads as glass rather than a dark plastic pill.
             Capsule(style: .continuous)
-                .strokeBorder(Color.white.opacity(0.1), lineWidth: 0.75)
+                .strokeBorder(Brand.inkText.opacity(0.12), lineWidth: 0.75)
         )
         .fixedSize()
         .onChange(of: level) { _, newValue in
@@ -207,7 +207,7 @@ private struct RecordingIndicatorView: View {
         case .transcribing, .refining, .refiningSlow, .preparing:
             ProgressView()
                 .controlSize(.small)
-                .tint(.white)
+                .tint(Brand.inkText.opacity(0.85))
         case .success:
             Image(systemName: "checkmark.circle.fill")
                 .font(.system(size: 16))
@@ -228,7 +228,7 @@ private struct RecordingIndicatorView: View {
             // advisory like "no speech" doesn't read as a hard error.
             Image(systemName: "waveform.slash")
                 .font(.system(size: 15, weight: .medium))
-                .foregroundStyle(Color(red: 0.95, green: 0.75, blue: 0.35))
+                .foregroundStyle(Brand.warningAmber)
         case .copiedToClipboard:
             Image(systemName: "doc.on.clipboard.fill")
                 .font(.system(size: 16))
@@ -236,7 +236,7 @@ private struct RecordingIndicatorView: View {
         case .cancelled:
             Image(systemName: "xmark.circle.fill")
                 .font(.system(size: 16))
-                .foregroundStyle(.white.opacity(0.6))
+                .foregroundStyle(Brand.inkText.opacity(0.6))
         }
     }
 
@@ -266,9 +266,9 @@ private struct RecordingIndicatorView: View {
         HStack(spacing: 3) {
             ForEach(0..<barCount, id: \.self) { index in
                 RoundedRectangle(cornerRadius: 1.5)
-                    .fill(Color.white.opacity(barBrightness(for: index)))
+                    .fill(Brand.inkText.opacity(barBrightness(for: index)))
                     .frame(width: 3, height: barHeight(for: index))
-                    .shadow(color: .white.opacity(barGlow(for: index)), radius: 2.5)
+                    .shadow(color: Brand.inkText.opacity(barGlow(for: index)), radius: 2.5)
             }
         }
         .frame(width: CGFloat(barCount) * 3 + CGFloat(barCount - 1) * 3, height: 20, alignment: .center)
@@ -513,6 +513,10 @@ final class RecordingIndicatorController {
             hostingView?.rootView = makeRootView()
             resizePanelToFitContent(animated: false)
             animateIn(panel, to: panel.frame.origin)
+            // 무음 실패 금지(함정 7): 인디케이터가 화면에 뜬 사실·창번호를
+            // 남겨 "인디케이터 안 뜸" 류 보고를 로그만으로 판별하고, 창 단독
+            // 캡처(screencapture -l) 검증 훅으로도 쓴다.
+            HwhisperLog.log("indicator shown: state=\(newState) number=\(panel.windowNumber)")
         }
     }
 

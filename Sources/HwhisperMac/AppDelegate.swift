@@ -237,6 +237,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         HwhisperLog.logLaunchHeader()
         migrateKeychainCredentialsIfNeeded()
         NSApp.setActivationPolicy(.accessory)
+        AppTheme.apply()   // 저장된 화면 테마(다크/라이트)를 창 표시 전에 반영
         installStandardMenu()
         setUpStatusItem()
 
@@ -342,7 +343,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let onboardingCompleted = UserDefaults.standard.bool(forKey: OnboardingView.completedDefaultsKey)
 
         if forceOnboarding {
-            onboardingWindowController.show(activate: activateOnboarding)
+            // Test hook: `--onboarding-page N` jumps to a page for screenshot
+            // verification (e.g. the finish page's theme toggle).
+            var onboardingPage = 0
+            if let idx = arguments.firstIndex(of: "--onboarding-page"),
+               idx + 1 < arguments.count, let n = Int(arguments[idx + 1]) {
+                onboardingPage = n
+            }
+            onboardingWindowController.show(activate: activateOnboarding, initialPage: onboardingPage)
         } else if !onboardingCompleted {
             onboardingWindowController.show()
         } else if !allPermissionsGranted && !UserDefaults.standard.bool(forKey: WelcomeView.hideOnLaunchDefaultsKey) {

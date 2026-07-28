@@ -77,7 +77,7 @@ struct HomeView: View {
                 BrandGlyph(height: 26)
                 Text("말하세요,\n받아 적는 건 제 일입니다.")
                     .font(.system(size: 26, weight: .bold, design: .rounded))
-                    .foregroundStyle(.white)
+                    .foregroundStyle(Brand.inkText)
                     .lineSpacing(3)
             }
             Label("음성은 이 Mac을 떠나지 않습니다 — 전사는 온디바이스에서 끝납니다.", systemImage: "lock.fill")
@@ -122,14 +122,14 @@ struct HomeView: View {
         return VStack(alignment: .leading, spacing: 12) {
             Text("어디에 많이 쓰나요")
                 .font(.headline)
-                .foregroundStyle(.white)
+                .foregroundStyle(Brand.inkText)
             VStack(spacing: 10) {
                 ForEach(stats.appUsage.prefix(5)) { usage in
                     let fraction = Double(usage.count) / Double(total)
                     HStack(spacing: 10) {
                         Text(Self.appName(usage.bundleID))
                             .font(.callout)
-                            .foregroundStyle(.white.opacity(0.88))
+                            .foregroundStyle(Brand.inkText.opacity(0.88))
                             .frame(width: 118, alignment: .leading)
                             .lineLimit(1)
                         GeometryReader { geo in
@@ -163,7 +163,7 @@ struct HomeView: View {
             VStack(alignment: .leading, spacing: 2) {
                 Text("말하기 버튼")
                     .font(.callout.weight(.semibold))
-                    .foregroundStyle(.white)
+                    .foregroundStyle(Brand.inkText)
                 Text("짧게 한 번 탭 = 시작/종료 · 시작 직후 다시 탭 = 취소")
                     .font(.caption)
                     .foregroundStyle(.secondary)
@@ -188,7 +188,7 @@ struct HomeView: View {
             HStack {
                 Text("최근 받아쓰기")
                     .font(.headline)
-                    .foregroundStyle(.white)
+                    .foregroundStyle(Brand.inkText)
                 Spacer()
                 Button("전체 보기") { onOpenHistory() }
                     .buttonStyle(.borderless)
@@ -209,7 +209,7 @@ struct HomeView: View {
                             VStack(alignment: .leading, spacing: 2) {
                                 Text(item.insertedText)
                                     .font(.callout)
-                                    .foregroundStyle(.white.opacity(0.88))
+                                    .foregroundStyle(Brand.inkText.opacity(0.88))
                                     .lineLimit(2)
                                 Text(item.createdAt.formatted(.relative(presentation: .named)))
                                     .font(.caption2)
@@ -289,14 +289,14 @@ private struct StatCard: View {
         VStack(alignment: .leading, spacing: 8) {
             Image(systemName: symbol)
                 .font(.system(size: 15, weight: .semibold))
-                .foregroundStyle(hero ? Brand.ink : Brand.accent)
+                .foregroundStyle(hero ? Brand.onAccent : Brand.accent)
             Text(value)
                 .font(.system(size: 26, weight: .bold, design: .rounded))
-                .foregroundStyle(hero ? Brand.ink : .white)
+                .foregroundStyle(hero ? Brand.onAccent : Brand.inkText)
                 .monospacedDigit()
             Text(title)
                 .font(.caption)
-                .foregroundStyle(hero ? Brand.ink.opacity(0.75) : .secondary)
+                .foregroundStyle(hero ? Brand.onAccent.opacity(0.75) : .secondary)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(16)
