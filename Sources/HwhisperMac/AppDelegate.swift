@@ -90,11 +90,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// (Gemini 3.1 real E2E, HwhisperEval --refine-test), so the 8192-token
     /// ceiling only bites around ~16,000 chars (~1 hour of speech) — tokens are
     /// NOT the real limit; latency, coherence, and editing risk are. So the cap
-    /// is set for UX, generously: 180s free speech ≈ ~800 chars (a long memo),
-    /// + a 60s final window ⇒ 240s / ~1,080 chars total → output only ~500
-    /// tokens (~7% of the ceiling). A 1,600-char input refined coherently in
-    /// 1.4s in testing, so there's ample headroom to raise these if wanted.
-    private static let recordingGracePeriod: TimeInterval = 180
+    /// is set for UX, generously: 240s free speech + a 60s final window ⇒ 300s
+    /// (5 min) total. At the 2.9-6.5 chars/s range measured across this app's
+    /// own history that is ~870-1,940 chars → still only ~400-900 output tokens
+    /// (~11% of the ceiling).
+    ///
+    /// Raised from 180+60 (240s) at user request — "가끔 시간이 조금 부족하다".
+    /// Safe to do only because the transcriber no longer loses the start of
+    /// long recordings (see `AppleSpeechRecognizer.inputChunkSeconds`); before
+    /// that fix, raising this cap would have *increased* silent data loss.
+    ///
+    /// One live edge at this cap: a fast speaker filling all 300s can exceed
+    /// `OpenAICompatibleRefiner.chunkCharBudget` (1,800), which routes into
+    /// `refineChunked` — that path forces `.polish`, so a user who picked
+    /// "다듬기 + 구조화" would silently get plain 다듬기. Content is never lost
+    /// there, only the list restructuring. Revisit if it shows up in practice.
+    private static let recordingGracePeriod: TimeInterval = 240
     private static let recordingFinalWindow: TimeInterval = 60
     private static var recordingMaxDuration: TimeInterval { recordingGracePeriod + recordingFinalWindow }
     private static let notificationAuthorizationRequestedKey = "notificationAuthorizationRequested"

@@ -13,6 +13,32 @@ import Speech
 /// `SpeechAnalyzer.bestAvailableAudioFormat`); this type does not resample.
 @available(macOS 26.0, iOS 26.0, *)
 public final class AppleSpeechRecognizer: SpeechRecognizer {
+    /// Seconds of audio per `AnalyzerInput` handed to `SpeechAnalyzer`.
+    ///
+    /// `SpeechAnalyzer` is a *streaming* API: it expects a sequence of small
+    /// realtime-sized buffers, not one buffer holding a whole utterance.
+    /// Feeding an oversized single `AnalyzerInput` makes the transcriber
+    /// silently **drop its first final result** — the beginning of the
+    /// dictation vanishes with no error, no log, and a perfectly normal
+    /// success path (v0.2.11 data-loss incident; 4 history rows lost their
+    /// opening, e.g. a 238.1s recording whose transcript started mid-sentence).
+    ///
+    /// Measured on this host (ko-KR, 16kHz mono, 245.7s TTS fixture of 29
+    /// numbered sentences, deterministic 3/3):
+    ///   - single buffer ≤214s → lossless
+    ///   - single buffer ≥215s → first final dropped (1818 → 1359 chars,
+    ///     finals 5 → 4; the first ~63s of speech gone)
+    ///   - a 1032s (17min) single buffer loses its first **98** sentences —
+    ///     the damage grows with length, so this must never be reintroduced
+    ///     by raising the recording cap.
+    /// Chunked feeding was lossless at every size tried (0.1/1/10/30/60/120/
+    /// 150/180/200/210/214s) and byte-identical to the single-buffer output
+    /// on a 99.9s control, so the exact value here is not delicate — 10s is
+    /// chosen for a ~21x safety margin under the observed cliff while keeping
+    /// buffer allocations few. Transcription latency is unchanged (2.0-2.1s
+    /// single-buffer vs 2.0-2.4s chunked on the 245.7s fixture).
+    private static let inputChunkSeconds: Double = 10
+
     public init() {}
 
     public var isAvailable: Bool {
@@ -75,8 +101,19 @@ public final class AppleSpeechRecognizer: SpeechRecognizer {
             // for more input that will never arrive.
             defer { continuation.finish() }
             for buffer in buffers {
-                let pcmBuffer = try Self.makePCMBuffer(from: buffer, format: audioFormat)
-                continuation.yield(AnalyzerInput(buffer: pcmBuffer))
+                let channels = max(buffer.channelCount, 1)
+                let totalFrames = buffer.samples.count / channels
+                guard totalFrames > 0 else {
+                    throw Self.conversionError("empty PCM buffer (0 usable frames, \(buffer.samples.count) samples / \(channels) channels)")
+                }
+                let chunkFrames = max(1, Int(audioFormat.sampleRate * Self.inputChunkSeconds))
+                var start = 0
+                while start < totalFrames {
+                    let end = min(start + chunkFrames, totalFrames)
+                    let pcmBuffer = try Self.makePCMBuffer(from: buffer, frames: start..<end, format: audioFormat)
+                    continuation.yield(AnalyzerInput(buffer: pcmBuffer))
+                    start = end
+                }
             }
         }
 
@@ -133,8 +170,11 @@ public final class AppleSpeechRecognizer: SpeechRecognizer {
         }
     }
 
-    /// Converts a plain-PCM `PCMBuffer` into an `AVAudioPCMBuffer` matching
-    /// `format` exactly. `SpeechAnalyzer.bestAvailableAudioFormat` is NOT
+    /// Converts the `frames` slice of a plain-PCM `PCMBuffer` into an
+    /// `AVAudioPCMBuffer` matching `format` exactly. Callers slice rather than
+    /// convert the whole utterance at once — see `inputChunkSeconds` for why
+    /// oversized `AnalyzerInput`s lose the start of the transcript.
+    /// `SpeechAnalyzer.bestAvailableAudioFormat` is NOT
     /// guaranteed to negotiate Float32 — on this host it negotiates
     /// `.pcmFormatInt16` (16kHz mono) — so both common formats are handled
     /// explicitly. Silently dropping unconvertible buffers previously caused
@@ -147,9 +187,13 @@ public final class AppleSpeechRecognizer: SpeechRecognizer {
     /// manages the underlying (de)interleaving internally — so no special
     /// casing is needed here. Confirmed moot in practice too: the negotiated
     /// format on this host is mono (channelCount == 1).
-    private static func makePCMBuffer(from buffer: PCMBuffer, format: AVAudioFormat) throws -> AVAudioPCMBuffer {
+    private static func makePCMBuffer(
+        from buffer: PCMBuffer,
+        frames: Range<Int>,
+        format: AVAudioFormat
+    ) throws -> AVAudioPCMBuffer {
         let channels = max(buffer.channelCount, 1)
-        let frameCount = AVAudioFrameCount(buffer.samples.count / channels)
+        let frameCount = AVAudioFrameCount(frames.count)
         guard frameCount > 0 else {
             throw Self.conversionError("empty PCM buffer (0 usable frames, \(buffer.samples.count) samples / \(channels) channels)")
         }
@@ -165,23 +209,23 @@ public final class AppleSpeechRecognizer: SpeechRecognizer {
             guard let channelData = pcmBuffer.floatChannelData else {
                 throw Self.conversionError("floatChannelData unavailable for negotiated Float32 format \(format)")
             }
-            for frame in 0..<Int(frameCount) {
+            for (offset, frame) in frames.enumerated() {
                 for channel in 0..<outputChannels {
                     let sourceChannel = min(channel, channels - 1)
                     let sampleIndex = frame * channels + sourceChannel
-                    channelData[channel][frame] = sampleIndex < buffer.samples.count ? buffer.samples[sampleIndex] : 0
+                    channelData[channel][offset] = sampleIndex < buffer.samples.count ? buffer.samples[sampleIndex] : 0
                 }
             }
         case .pcmFormatInt16:
             guard let channelData = pcmBuffer.int16ChannelData else {
                 throw Self.conversionError("int16ChannelData unavailable for negotiated Int16 format \(format)")
             }
-            for frame in 0..<Int(frameCount) {
+            for (offset, frame) in frames.enumerated() {
                 for channel in 0..<outputChannels {
                     let sourceChannel = min(channel, channels - 1)
                     let sampleIndex = frame * channels + sourceChannel
                     let floatSample = sampleIndex < buffer.samples.count ? buffer.samples[sampleIndex] : 0
-                    channelData[channel][frame] = Self.scaledInt16(from: floatSample)
+                    channelData[channel][offset] = Self.scaledInt16(from: floatSample)
                 }
             }
         default:
