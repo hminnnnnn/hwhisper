@@ -100,11 +100,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// long recordings (see `AppleSpeechRecognizer.inputChunkSeconds`); before
     /// that fix, raising this cap would have *increased* silent data loss.
     ///
-    /// One live edge at this cap: a fast speaker filling all 300s can exceed
-    /// `OpenAICompatibleRefiner.chunkCharBudget` (1,800), which routes into
-    /// `refineChunked` — that path forces `.polish`, so a user who picked
-    /// "다듬기 + 구조화" would silently get plain 다듬기. Content is never lost
-    /// there, only the list restructuring. Revisit if it shows up in practice.
+    /// `OpenAICompatibleRefiner.chunkCharBudget` was raised to 2,400 (v0.2.13)
+    /// to match this cap, so a full 300s dictation refines in one call and an
+    /// enumeration spanning the whole recording keeps continuous numbering.
+    /// Chunking now only engages above ~2,400 chars, which simulation puts
+    /// beyond the worst realistic 5-minute transcript.
     private static let recordingGracePeriod: TimeInterval = 240
     private static let recordingFinalWindow: TimeInterval = 60
     private static var recordingMaxDuration: TimeInterval { recordingGracePeriod + recordingFinalWindow }

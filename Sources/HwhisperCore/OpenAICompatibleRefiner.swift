@@ -266,10 +266,30 @@ public final class OpenAICompatibleRefiner: TextRefiner {
         return results.joined(separator: " ")
     }
 
-    /// Max graphemes per chunk. Sized so worst-case Korean output (~2-3
-    /// tokens/char, output ≈ input length) stays well under the 8192-token
-    /// ceiling: 1800 × ~3 ≈ 5400 < 8192.
-    static let chunkCharBudget = 1800
+    /// Max graphemes per chunk — sized to hold a full 5-minute dictation in a
+    /// SINGLE call, because splitting is not free: each chunk is refined
+    /// independently at `.polish`, so an enumeration that straddles a chunk
+    /// boundary loses its numbering.
+    ///
+    /// Raised 1800 → 2400 (v0.2.13) on measured A/B over one identical
+    /// 2,318-char colloquial transcript with six complaints and NO spoken
+    /// ordinals (spoken "두 번째로…" hides the bug — per-chunk polish preserves
+    /// those words and numbering survives by accident of content):
+    ///   - 1800 (2 chunks): list rendered as plain bullets, 5/5 runs
+    ///   - 2400 (1 chunk):  "1. 2. 3. 4. 5. 6.", 5/5 runs
+    /// Cost of the bigger single call, same input, real Gemini 3.1-flash-lite:
+    /// latency 1.8s → 2.1s worst of 5 (the app's bound is 20s — `rounds` is 1
+    /// for both shapes since ≤4 chunks run in one parallel round, so a split
+    /// never bought extra timeout budget), output ~343 tokens = 4% of the 8192
+    /// ceiling, 0/5 truncations.
+    ///
+    /// The old 1800 was justified by a conservative "~2-3 tokens/char" guess;
+    /// 함정 17 later measured 0.46 tokens/char for Korean, so even 2400 × 3 ≈
+    /// 7200 < 8192 holds under the original pessimistic assumption. Sized to
+    /// the 300s recording cap: simulation puts the worst realistic 5-minute
+    /// transcript at ~2,318 chars, so chunking survives only as a safety net
+    /// for pathologically fast speech.
+    static let chunkCharBudget = 2400
     /// Concurrent chunk requests — bounded to avoid free-tier rate-limit bursts
     /// while keeping wall-clock ≈ ceil(chunks / chunkConcurrency) calls.
     public static let chunkConcurrency = 4
