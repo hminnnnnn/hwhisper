@@ -50,8 +50,15 @@ BRANCH="$(git rev-parse --abbrev-ref HEAD)"
 [ "$BRANCH" = "main" ] || die "main 브랜치가 아닙니다 (현재: $BRANCH)"
 ok "브랜치 main"
 
-git diff --quiet -- "$APP_SCRIPT" \
-  || die "$APP_SCRIPT 에 커밋되지 않은 변경이 있습니다 — 정리 후 다시 실행하세요"
+# make-app.sh 에 다른 미커밋 수정이 섞여 있는 것 자체는 정상이다 — 빌드 방식을
+# 바꾸면서 함께 내보내는 릴리스가 실제로 있다(v0.2.15 유니버설 전환). 막아야 할
+# 것은 BUNDLE_VERSION 줄이 *이미* 손대져 있는 경우뿐이다. 그때는 무엇을 기준으로
+# 올리는 건지가 모호해진다.
+COMMITTED_VER="$(git show "HEAD:$APP_SCRIPT" 2>/dev/null | sed -n 's/^BUNDLE_VERSION="\(.*\)"$/\1/p' || true)"
+if [ -n "$COMMITTED_VER" ] && [ "$COMMITTED_VER" != "$OLD" ]; then
+  die "BUNDLE_VERSION 이 이미 수정돼 있습니다 (커밋됨 $COMMITTED_VER / 작업본 $OLD) — 정리 후 실행하세요"
+fi
+ok "BUNDLE_VERSION 미선점 (커밋본과 일치)"
 
 git rev-parse -q --verify "refs/tags/v$NEW" >/dev/null \
   && die "태그 v$NEW 가 이미 존재합니다"

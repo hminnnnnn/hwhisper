@@ -51,7 +51,7 @@
 ## 요구 사항
 
 - **Apple 음성 엔진(기본):** macOS 26(Tahoe) 이상 **+ Apple Silicon(M1 이상)**. Apple `SpeechTranscriber`는 Neural Engine에 의존하므로 Intel Mac에서는 이 엔진을 쓸 수 없습니다.
-- **구형/Intel Mac:** WhisperKit 폴백 경로 지원 예정(모델 다운로드·메모리 사용량이 더 큼).
+- **구형/Intel Mac:** v0.2.15부터 **유니버설 바이너리**(arm64 + x86_64)로 배포되어 설치·실행이 가능하며, WhisperKit 폴백 엔진을 사용합니다(모델 다운로드 ~600MB·메모리 사용량이 더 크고 첫 받아쓰기가 느림). 다만 **Intel 실기기 검증은 아직 못 했습니다** — 개발 환경에 Intel Mac이 없어 빌드·서명까지만 확인된 상태이니, 쓰시다 문제가 있으면 이슈로 알려 주세요.
 - **소스 빌드 시:** Xcode Command Line Tools (`xcode-select --install`) — 전체 Xcode는 필요 없습니다.
 
 ## 설치
@@ -100,7 +100,8 @@ uname -m                  # arm64 = Apple Silicon, x86_64 = Intel
 ```
 
 - **macOS 26 이상 + `arm64`** → Apple 온디바이스 엔진(빠름·고정확). 최적 경로.
-- **macOS 14~15 (또는 `x86_64` Intel)** → 실행은 되지만 WhisperKit 폴백 사용. **최초 1회 모델 다운로드(~600MB)** 와 **첫 받아쓰기 수 분 소요**를 미리 안내하세요.
+- **macOS 14~15 (Apple Silicon)** → 실행되며 WhisperKit 폴백 사용. **최초 1회 모델 다운로드(~600MB)** 와 **첫 받아쓰기 수 분 소요**를 미리 안내하세요.
+- **`x86_64` (Intel)** → v0.2.15+ 유니버설 빌드라 실행되며 역시 WhisperKit 폴백. Neural Engine이 없어 Apple Silicon보다 느립니다. **실기기 검증 전이라 실험적**으로 봐주세요.
 - **macOS 14 미만** → 미지원. 업데이트 안내.
 
 ### 1단계 — 앱 받기 (둘 중 하나)

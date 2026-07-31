@@ -16,23 +16,55 @@ cd "$ROOT_DIR"
 
 APP_NAME="Hwhisper"
 BUNDLE_ID="com.hminn.hwhisper"
-BUNDLE_VERSION="0.2.14"
+BUNDLE_VERSION="0.2.15"
 DIST_DIR="$ROOT_DIR/dist"
 APP_DIR="$DIST_DIR/$APP_NAME.app"
 CONTENTS_DIR="$APP_DIR/Contents"
 MACOS_DIR="$CONTENTS_DIR/MacOS"
 RESOURCES_DIR="$CONTENTS_DIR/Resources"
 
-echo "==> Building $APP_NAME (release)"
-swift build -c release --product HwhisperMac
+# Universal (arm64 + x86_64) so Intel Macs can install and launch at all. They
+# route to the WhisperKit engine, since Apple's SpeechTranscriber requires
+# macOS 26 + Apple Silicon — but that fallback was unreachable while the shipped
+# binary was arm64-only: the app simply would not start, and Rosetta does not
+# help (it translates Intel→ARM, not the reverse).
+#
+# Producing both slices in one `swift build --arch arm64 --arch x86_64` needs
+# xcbuild from a full Xcode, which this CLT-only host does not have. Building
+# each slice separately and lipo-ing them yields the same binary using only the
+# Command Line Tools.
+ARCHS=(arm64 x86_64)
+UNIVERSAL_DIR="$ROOT_DIR/.build/universal"
+EXECUTABLE_SRC="$UNIVERSAL_DIR/HwhisperMac"
+SLICES=()
 
-BIN_PATH="$(swift build -c release --show-bin-path)"
-EXECUTABLE_SRC="$BIN_PATH/HwhisperMac"
+echo "==> Building $APP_NAME (release, universal: ${ARCHS[*]})"
+for arch in "${ARCHS[@]}"; do
+    printf '    - %s\n' "$arch"
+    swift build -c release --product HwhisperMac --arch "$arch"
+    slice="$(swift build -c release --product HwhisperMac --arch "$arch" --show-bin-path)/HwhisperMac"
+    if [[ ! -f "$slice" ]]; then
+        echo "error: $arch slice not found at $slice" >&2
+        exit 1
+    fi
+    SLICES+=("$slice")
+done
 
-if [[ ! -f "$EXECUTABLE_SRC" ]]; then
-    echo "error: built executable not found at $EXECUTABLE_SRC" >&2
-    exit 1
-fi
+mkdir -p "$UNIVERSAL_DIR"
+lipo -create "${SLICES[@]}" -output "$EXECUTABLE_SRC"
+
+# Verify both slices landed. A silently single-arch binary is exactly the bug
+# this replaces, and it is invisible until an Intel user tries to open the app.
+for arch in "${ARCHS[@]}"; do
+    if ! lipo -archs "$EXECUTABLE_SRC" | tr ' ' '\n' | grep -qx "$arch"; then
+        echo "error: universal binary is missing the $arch slice" >&2
+        exit 1
+    fi
+done
+echo "    universal binary: $(lipo -archs "$EXECUTABLE_SRC")"
+
+# Resource bundles carry no machine code; take them from the native slice.
+BIN_PATH="$(swift build -c release --product HwhisperMac --arch arm64 --show-bin-path)"
 
 echo "==> Assembling $APP_DIR"
 rm -rf "$APP_DIR"
