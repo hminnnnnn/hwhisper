@@ -431,6 +431,79 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 self?.recordingIndicator.updateLevel(0.6)
             }
         }
+        // Test-only: `--test-pipeline <wav>` injects a WAV straight into the
+        // REAL processing path (VAD → engine routing → refinement → history →
+        // insertion), i.e. everything `stopCaptureAndEnqueue` would do with a
+        // live recording, minus microphone capture and the guided-duration
+        // timer. That makes the full chain verifiable without synthesizing a
+        // global hotkey or playing audio out loud — both unsafe when a
+        // messenger or meeting is frontmost (함정 1).
+        //
+        // Inherently serial: one app instance owns the hotkey, the mic and the
+        // insertion target, so these runs cannot be parallelized at the app
+        // level (run HwhisperEval for parallel component checks instead).
+        if let flagIndex = arguments.firstIndex(of: "--test-pipeline"), flagIndex + 1 < arguments.count {
+            let path = arguments[flagIndex + 1]
+            // Let the launch settle so the snapshot sees the intended target
+            // app rather than whatever was frontmost mid-launch.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in
+                self?.runTestPipeline(wavPath: path)
+            }
+        }
+    }
+
+    /// Drives one full pipeline pass over a WAV file — see `--test-pipeline`.
+    private func runTestPipeline(wavPath: String) {
+        guard let buffer = Self.decodeTestWav(path: wavPath) else {
+            HwhisperLog.log("test-pipeline: failed to decode \(wavPath)")
+            return
+        }
+        let seconds = buffer.sampleRate > 0 ? Double(buffer.samples.count) / buffer.sampleRate : 0
+        HwhisperLog.log("test-pipeline: injecting \(buffer.samples.count) samples @ \(buffer.sampleRate)Hz = \(String(format: "%.1f", seconds))s from \((wavPath as NSString).lastPathComponent)")
+        let snapshot = TargetContextSnapshot.capture()
+        let jobID = UUID()
+        HwhisperLog.log("job \(jobID) queued (test-pipeline)")
+        pipelineActor.enqueue(PipelineJob(
+            id: jobID,
+            run: { [weak self] in await self?.processQueuedJob(buffer: buffer, snapshot: snapshot) },
+            onDropped: { [weak self] in self?.handleJobDropped(jobID: jobID) }
+        ))
+    }
+
+    /// Minimal 16-bit PCM WAV reader for `--test-pipeline` fixtures (the shape
+    /// `fixtures/generate_fixtures.py` emits: `afconvert -f WAVE -d LEI16@16000
+    /// -c 1`). Not a general-purpose decoder — test-only.
+    private static func decodeTestWav(path: String) -> PCMBuffer? {
+        guard let data = try? Data(contentsOf: URL(fileURLWithPath: path)), data.count > 44 else { return nil }
+        let bytes = [UInt8](data)
+        func u32(_ i: Int) -> Int {
+            Int(UInt32(bytes[i]) | UInt32(bytes[i + 1]) << 8 | UInt32(bytes[i + 2]) << 16 | UInt32(bytes[i + 3]) << 24)
+        }
+        var index = 12
+        var sampleRate = 16000.0
+        var channels = 1
+        var samples: [Float] = []
+        while index + 8 <= bytes.count {
+            let id = String(bytes: bytes[index..<index + 4], encoding: .ascii) ?? ""
+            let size = u32(index + 4)
+            let body = index + 8
+            if id == "fmt " {
+                channels = Int(UInt16(bytes[body + 2]) | UInt16(bytes[body + 3]) << 8)
+                sampleRate = Double(u32(body + 4))
+            } else if id == "data" {
+                let end = min(body + size, bytes.count)
+                samples.reserveCapacity((end - body) / 2)
+                var cursor = body
+                while cursor + 1 < end {
+                    let raw = Int16(bitPattern: UInt16(bytes[cursor]) | UInt16(bytes[cursor + 1]) << 8)
+                    samples.append(Float(raw) / 32768.0)
+                    cursor += 2
+                }
+            }
+            index = body + size + (size % 2)
+        }
+        guard !samples.isEmpty else { return nil }
+        return PCMBuffer(samples: samples, sampleRate: sampleRate, channelCount: max(channels, 1))
     }
 
     /// As an `.accessory` (menu-bar-only, no Dock icon) app, this process
