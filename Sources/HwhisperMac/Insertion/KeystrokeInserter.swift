@@ -7,7 +7,7 @@ import CoreGraphics
 /// than risk mangled Korean output; the registry then has nothing left to
 /// try and surfaces a failure (clipboard-preserve + notify).
 struct KeystrokeInserter: InsertionStrategy {
-    func insert(_ text: String, snapshot: TargetContextSnapshot) async -> InsertionOutcome {
+    func insert(_ text: String, destination: InsertionDestination) async -> InsertionOutcome {
         guard text.unicodeScalars.allSatisfy({ $0.isASCII }) else {
             return .notApplicable
         }

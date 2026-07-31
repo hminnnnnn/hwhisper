@@ -25,9 +25,11 @@ struct InsertionStrategyRegistry {
         self.clipboardInserter = ClipboardPasteInserter(notifier: notifier)
     }
 
-    func strategies(for snapshot: TargetContextSnapshot) -> [InsertionStrategy] {
-        if let bundleIdentifier = snapshot.bundleIdentifier,
-           Self.axPreferredBundleIdentifiers.contains(bundleIdentifier) {
+    /// Ordered for the app that will actually receive the text — resolved at
+    /// insertion time (`InsertionDestination`), not from the hotkey-down
+    /// snapshot, since the caret may have moved to a different app by now.
+    func strategies(forBundleIdentifier bundleIdentifier: String?) -> [InsertionStrategy] {
+        if let bundleIdentifier, Self.axPreferredBundleIdentifiers.contains(bundleIdentifier) {
             return [accessibilityInserter, clipboardInserter, keystrokeInserter]
         }
         return [clipboardInserter, accessibilityInserter, keystrokeInserter]

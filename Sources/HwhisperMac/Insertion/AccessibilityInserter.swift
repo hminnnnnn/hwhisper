@@ -6,10 +6,9 @@ import ApplicationServices
 /// exposes a settable AX selected-text/value attribute — reports
 /// `.notApplicable` otherwise so the registry falls through to C1.
 ///
-/// Re-queries the focused `AXUIElement` from `snapshot.processIdentifier`
-/// rather than reusing any element captured earlier (TargetContextSnapshot
-/// intentionally does not expose a live element reference — see its doc
-/// comment on staleness).
+/// Re-queries the focused `AXUIElement` from `destination.processIdentifier`
+/// — the app resolved at insertion time, so a focus change lands the text
+/// where the caret actually is instead of in the app the user left.
 ///
 /// User feedback #3 ("텍스트가 잘 안 들어가는 것 같다"): several real-world
 /// apps (Electron, browsers, KakaoTalk) report `AXUIElementSetAttributeValue`
@@ -19,10 +18,8 @@ import ApplicationServices
 /// the text is actually visible in it; otherwise it reports `.notApplicable`
 /// (not `.failed`) so the registry falls through to C1 instead of stopping.
 struct AccessibilityInserter: InsertionStrategy {
-    func insert(_ text: String, snapshot: TargetContextSnapshot) async -> InsertionOutcome {
-        guard let pid = snapshot.processIdentifier else { return .notApplicable }
-
-        let appElement = AXUIElementCreateApplication(pid)
+    func insert(_ text: String, destination: InsertionDestination) async -> InsertionOutcome {
+        let appElement = AXUIElementCreateApplication(destination.processIdentifier)
         var focusedRef: CFTypeRef?
         guard AXUIElementCopyAttributeValue(appElement, kAXFocusedUIElementAttribute as CFString, &focusedRef) == .success,
               let focusedRef,

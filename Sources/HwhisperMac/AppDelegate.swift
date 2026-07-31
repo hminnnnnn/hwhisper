@@ -1150,17 +1150,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // outcome before returning to idle.
         pipelineActor.transition(to: .restoring)
         switch outcome {
-        case .inserted:
+        case .inserted(_, let bundleIdentifier):
             setLastError(nil)
             setStatusIcon(Self.successIcon, autoRevertAfter: 1.5)
-            recordingIndicator.showSuccess()
-        case .abortedContextMismatch:
-            // User-requested fallback: don't discard the transcript just
-            // because focus moved — `TextInserter` already copied it to the
-            // clipboard (see its `.abortedContextMismatch` case), so tell
-            // the user where it is instead of treating this as a bare
-            // failure.
-            let reason = "포커스가 바뀌어 클립보드에 복사했습니다 — ⌘V로 붙여넣기"
+            // Landing somewhere other than where dictation started is allowed
+            // now (the caret is followed, not the snapshot), but it must never
+            // be silent — otherwise text could appear in a chat window without
+            // the user noticing. Same app ⇒ the plain "완료" pill as before.
+            if bundleIdentifier != snapshot.bundleIdentifier,
+               let name = movedTargetDisplayName(for: bundleIdentifier) {
+                recordingIndicator.showCopiedToClipboard("\(name)에 입력했습니다 — 클립보드에도 복사됨")
+            } else {
+                recordingIndicator.showSuccess()
+            }
+        case .copiedToClipboard(let reason):
+            // Nothing focused could accept text. The transcript is on the
+            // clipboard; say so rather than reporting a bare failure.
             setLastError(nil)
             setStatusIcon(Self.successIcon, autoRevertAfter: 1.5)
             recordingIndicator.showCopiedToClipboard(reason)
@@ -1182,6 +1187,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         pipelineActor.transition(to: .idle)
     }
 
+    /// Display name for an app the transcript landed in when it is *not* the
+    /// app dictation started in. `nil` when it can't be resolved — the caller
+    /// then shows the plain success pill rather than an awkward bundle ID.
+    private func movedTargetDisplayName(for bundleIdentifier: String?) -> String? {
+        guard let bundleIdentifier else { return nil }
+        return NSRunningApplication
+            .runningApplications(withBundleIdentifier: bundleIdentifier)
+            .first?
+            .localizedName
+    }
+
     /// Fire-and-forget history write (§BACKLOG v0.2-2). Never blocks the
     /// pipeline: the save runs in its own task, and a failure only logs —
     /// dictation must not degrade because the history DB is unhappy.
@@ -1194,16 +1210,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     ) {
         guard HistorySettings.isEnabled, !rawText.isEmpty else { return }
         let outcomeLabel: String
+        // Record where the text actually landed, not where dictation started —
+        // the caret may have moved to another app, and the home tab's app-usage
+        // stats should reflect reality.
+        var targetBundleID = snapshot.bundleIdentifier
         switch outcome {
-        case .inserted: outcomeLabel = "inserted"
-        case .abortedContextMismatch: outcomeLabel = "clipboard"
+        case .inserted(_, let bundleIdentifier):
+            outcomeLabel = "inserted"
+            targetBundleID = bundleIdentifier ?? snapshot.bundleIdentifier
+        case .copiedToClipboard: outcomeLabel = "clipboard"
         case .abortedSecureField: outcomeLabel = "secureField"
         case .failed: outcomeLabel = "failed"
         }
         let item = HistoryItem(
             rawText: rawText,
             refinedText: insertedText == rawText ? nil : insertedText,
-            targetBundleID: snapshot.bundleIdentifier,
+            targetBundleID: targetBundleID,
             outcome: outcomeLabel,
             durationSeconds: durationSeconds
         )

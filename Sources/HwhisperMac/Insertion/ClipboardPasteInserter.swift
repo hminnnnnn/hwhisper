@@ -26,7 +26,7 @@ struct ClipboardPasteInserter: InsertionStrategy {
         self.pasteSettleNanoseconds = pasteSettleNanoseconds
     }
 
-    func insert(_ text: String, snapshot: TargetContextSnapshot) async -> InsertionOutcome {
+    func insert(_ text: String, destination: InsertionDestination) async -> InsertionOutcome {
         let saved = clipboard.save()
         clipboard.setText(text)
 
