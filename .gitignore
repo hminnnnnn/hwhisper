@@ -37,3 +37,6 @@ BACKLOG.md
 
 # Benchmark fixtures — regenerate with fixtures/generate_fixtures.py (dev-only, ~6MB)
 fixtures/audio/
+
+# Playwright MCP run artifacts (snapshots/console logs from browser verification)
+.playwright-mcp/
