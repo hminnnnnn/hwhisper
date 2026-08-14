@@ -56,6 +56,83 @@ public protocol HistoryStore: Sendable {
     /// Newest-first rows recorded at or after `date` — the home tab's
     /// weekly-stats source (word/saved-time math happens in the caller).
     func items(since date: Date) async throws -> [HistoryItem]
+    /// Totals over `[since, ∞)` — `nil` means "everything ever recorded".
+    /// Computed in SQL rather than by loading rows: the home tab's default
+    /// view is all-time, and pulling every transcript's full text into memory
+    /// just to count words would grow without bound.
+    func aggregate(since date: Date?) async throws -> HistoryAggregate
+    /// Per-app dictation counts over `[since, ∞)`, descending by count.
+    func appCounts(since date: Date?) async throws -> [HistoryAppCount]
+    /// Lightweight (timestamp, duration, words) triples for charting. Carries
+    /// no transcript text, so a multi-month series stays cheap.
+    func metrics(since date: Date?) async throws -> [HistoryMetricPoint]
     func delete(id: UUID) async throws
     func deleteAll() async throws
+}
+
+/// Totals for a period. Word counts come from the stored `word_count`
+/// column so the number can never drift from what the UI would compute.
+public struct HistoryAggregate: Sendable, Equatable {
+    public var dictations: Int
+    public var speechSeconds: Double
+    public var words: Int
+
+    public init(dictations: Int = 0, speechSeconds: Double = 0, words: Int = 0) {
+        self.dictations = dictations
+        self.speechSeconds = speechSeconds
+        self.words = words
+    }
+
+    /// How long these words would have taken to type, per `typingWordsPerMinute`.
+    public func typedSecondsEquivalent(wordsPerMinute: Double) -> Double {
+        wordsPerMinute > 0 ? Double(words) / wordsPerMinute * 60 : 0
+    }
+
+    /// Time saved versus typing. Clamped at zero — a slow, heavily-paused
+    /// dictation can legitimately take longer than typing it would have, and
+    /// a negative "saving" is not a claim worth making.
+    public func savedSeconds(typingWordsPerMinute: Double) -> Double {
+        max(0, typedSecondsEquivalent(wordsPerMinute: typingWordsPerMinute) - speechSeconds)
+    }
+
+    /// Dictation words per minute of speech. Needs a few seconds of audio
+    /// before the figure means anything.
+    public var wordsPerMinute: Int {
+        speechSeconds >= 5 ? Int((Double(words) / speechSeconds * 60).rounded()) : 0
+    }
+}
+
+public struct HistoryAppCount: Sendable, Equatable, Identifiable {
+    public let bundleID: String
+    public let count: Int
+    public var id: String { bundleID }
+
+    public init(bundleID: String, count: Int) {
+        self.bundleID = bundleID
+        self.count = count
+    }
+}
+
+public struct HistoryMetricPoint: Sendable, Equatable {
+    public let createdAt: Date
+    public let durationSeconds: Double
+    public let words: Int
+
+    public init(createdAt: Date, durationSeconds: Double, words: Int) {
+        self.createdAt = createdAt
+        self.durationSeconds = durationSeconds
+        self.words = words
+    }
+}
+
+/// The single definition of "a word" in this app. Kept in Core so the value
+/// written to `history.word_count` at save time, the value backfilled into
+/// old rows, and anything the UI recomputes are all the same function.
+///
+/// Whitespace separation means this counts 어절 for Korean rather than
+/// dictionary words — see the caveat on `typingWordsPerMinute`.
+public enum TranscriptMetrics {
+    public static func wordCount(_ text: String) -> Int {
+        text.split(whereSeparator: { $0.isWhitespace || $0.isNewline }).count
+    }
 }

@@ -87,8 +87,113 @@ public actor SQLiteHistoryStore: HistoryStore {
         // idempotence check, so the result is deliberately ignored.
         sqlite3_exec(handle, "ALTER TABLE history ADD COLUMN duration_seconds REAL NOT NULL DEFAULT 0", nil, nil, nil)
 
+        // v0.2.16 migration: `word_count` lets the home tab total words in SQL
+        // instead of loading every transcript. The default is -1, not 0, so
+        // rows predating the column are distinguishable from rows that really
+        // contain no words — otherwise the backfill below could not tell them
+        // apart and old dictations would silently count as zero words.
+        sqlite3_exec(handle, "ALTER TABLE history ADD COLUMN word_count INTEGER NOT NULL DEFAULT -1", nil, nil, nil)
+
         db = Connection(handle: handle)
+        backfillWordCounts(handle)
         return handle
+    }
+
+    /// One-time fill of `word_count` for rows written before the column
+    /// existed. Runs on first open after the migration; afterwards the
+    /// `word_count < 0` predicate matches nothing and this is a single
+    /// indexless scan of an already-small table.
+    private func backfillWordCounts(_ db: OpaquePointer) {
+        var select: OpaquePointer?
+        guard sqlite3_prepare_v2(db, "SELECT id, raw_text, refined_text FROM history WHERE word_count < 0", -1, &select, nil) == SQLITE_OK else { return }
+        var pending: [(id: String, words: Int)] = []
+        while sqlite3_step(select) == SQLITE_ROW {
+            guard let idText = sqlite3_column_text(select, 0), let rawText = sqlite3_column_text(select, 1) else { continue }
+            let raw = String(cString: rawText)
+            let refined = sqlite3_column_text(select, 2).map { String(cString: $0) }
+            pending.append((String(cString: idText), TranscriptMetrics.wordCount(refined ?? raw)))
+        }
+        sqlite3_finalize(select)
+        guard !pending.isEmpty else { return }
+
+        sqlite3_exec(db, "BEGIN", nil, nil, nil)
+        var update: OpaquePointer?
+        if sqlite3_prepare_v2(db, "UPDATE history SET word_count = ? WHERE id = ?", -1, &update, nil) == SQLITE_OK {
+            for row in pending {
+                sqlite3_reset(update)
+                sqlite3_bind_int(update, 1, Int32(row.words))
+                sqlite3_bind_text(update, 2, row.id, -1, sqliteTransient)
+                sqlite3_step(update)
+            }
+        }
+        sqlite3_finalize(update)
+        sqlite3_exec(db, "COMMIT", nil, nil, nil)
+    }
+
+    /// `created_at >= ?` when a start date is given, otherwise everything.
+    /// Returned as SQL text plus a binder so each query below states its
+    /// range once.
+    private func rangeClause(_ date: Date?) -> String {
+        date == nil ? "" : " WHERE created_at >= ?"
+    }
+
+    public func aggregate(since date: Date?) async throws -> HistoryAggregate {
+        let db = try connection()
+        let sql = "SELECT COUNT(*), COALESCE(SUM(duration_seconds), 0), COALESCE(SUM(MAX(word_count, 0)), 0) FROM history" + rangeClause(date)
+        var statement: OpaquePointer?
+        guard sqlite3_prepare_v2(db, sql, -1, &statement, nil) == SQLITE_OK else {
+            throw StoreError.queryFailed(String(cString: sqlite3_errmsg(db)))
+        }
+        defer { sqlite3_finalize(statement) }
+        if let date { sqlite3_bind_double(statement, 1, date.timeIntervalSince1970) }
+        guard sqlite3_step(statement) == SQLITE_ROW else { return HistoryAggregate() }
+        return HistoryAggregate(
+            dictations: Int(sqlite3_column_int(statement, 0)),
+            speechSeconds: sqlite3_column_double(statement, 1),
+            words: Int(sqlite3_column_int64(statement, 2))
+        )
+    }
+
+    public func appCounts(since date: Date?) async throws -> [HistoryAppCount] {
+        let db = try connection()
+        let scope = date == nil
+            ? " WHERE target_bundle_id IS NOT NULL AND target_bundle_id <> ''"
+            : " WHERE created_at >= ? AND target_bundle_id IS NOT NULL AND target_bundle_id <> ''"
+        let sql = "SELECT target_bundle_id, COUNT(*) AS n FROM history" + scope + " GROUP BY target_bundle_id ORDER BY n DESC"
+        var statement: OpaquePointer?
+        guard sqlite3_prepare_v2(db, sql, -1, &statement, nil) == SQLITE_OK else {
+            throw StoreError.queryFailed(String(cString: sqlite3_errmsg(db)))
+        }
+        defer { sqlite3_finalize(statement) }
+        if let date { sqlite3_bind_double(statement, 1, date.timeIntervalSince1970) }
+
+        var result: [HistoryAppCount] = []
+        while sqlite3_step(statement) == SQLITE_ROW {
+            guard let bundle = sqlite3_column_text(statement, 0) else { continue }
+            result.append(HistoryAppCount(bundleID: String(cString: bundle), count: Int(sqlite3_column_int(statement, 1))))
+        }
+        return result
+    }
+
+    public func metrics(since date: Date?) async throws -> [HistoryMetricPoint] {
+        let db = try connection()
+        let sql = "SELECT created_at, duration_seconds, MAX(word_count, 0) FROM history" + rangeClause(date) + " ORDER BY created_at ASC"
+        var statement: OpaquePointer?
+        guard sqlite3_prepare_v2(db, sql, -1, &statement, nil) == SQLITE_OK else {
+            throw StoreError.queryFailed(String(cString: sqlite3_errmsg(db)))
+        }
+        defer { sqlite3_finalize(statement) }
+        if let date { sqlite3_bind_double(statement, 1, date.timeIntervalSince1970) }
+
+        var points: [HistoryMetricPoint] = []
+        while sqlite3_step(statement) == SQLITE_ROW {
+            points.append(HistoryMetricPoint(
+                createdAt: Date(timeIntervalSince1970: sqlite3_column_double(statement, 0)),
+                durationSeconds: sqlite3_column_double(statement, 1),
+                words: Int(sqlite3_column_int(statement, 2))
+            ))
+        }
+        return points
     }
 
     /// Shared row decoder for every SELECT below (column order:
@@ -115,7 +220,7 @@ public actor SQLiteHistoryStore: HistoryStore {
 
     public func save(_ item: HistoryItem) async throws {
         let db = try connection()
-        let sql = "INSERT INTO history (id, raw_text, refined_text, target_bundle_id, outcome, created_at, duration_seconds) VALUES (?, ?, ?, ?, ?, ?, ?)"
+        let sql = "INSERT INTO history (id, raw_text, refined_text, target_bundle_id, outcome, created_at, duration_seconds, word_count) VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
         var statement: OpaquePointer?
         guard sqlite3_prepare_v2(db, sql, -1, &statement, nil) == SQLITE_OK else {
             throw StoreError.queryFailed(String(cString: sqlite3_errmsg(db)))
@@ -137,6 +242,7 @@ public actor SQLiteHistoryStore: HistoryStore {
         sqlite3_bind_text(statement, 5, item.outcome, -1, sqliteTransient)
         sqlite3_bind_double(statement, 6, item.createdAt.timeIntervalSince1970)
         sqlite3_bind_double(statement, 7, item.durationSeconds)
+        sqlite3_bind_int(statement, 8, Int32(TranscriptMetrics.wordCount(item.insertedText)))
 
         guard sqlite3_step(statement) == SQLITE_DONE else {
             throw StoreError.queryFailed(String(cString: sqlite3_errmsg(db)))

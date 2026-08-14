@@ -170,7 +170,15 @@ final class SingleKeyHotkeyMonitor {
     private let onTap: () -> Void
     private var flagsMonitor: Any?
     private var interruptMonitor: Any?
-    private var keyDownAt: Date?
+    /// The *event's* timestamp for the target key's press — seconds since
+    /// system startup, stamped by the window server when the key physically
+    /// moved. Deliberately not `Date()` read at handler entry: see
+    /// `handleFlagsChanged`.
+    private var keyDownAt: TimeInterval?
+    /// Wall clock at the moment the press was *processed*. Not used for the
+    /// tap decision — only to report how far behind the app was running, which
+    /// is the field signal for App Nap / scheduling stalls.
+    private var keyDownProcessedAt: Date?
     private var interrupted = false
     private var targetKeyCode: CGKeyCode?
 
@@ -203,7 +211,16 @@ final class SingleKeyHotkeyMonitor {
             // (copy) from also triggering dictation.
             interruptMonitor = NSEvent.addGlobalMonitorForEvents(
                 matching: [.keyDown, .leftMouseDown, .rightMouseDown, .otherMouseDown, .scrollWheel]
-            ) { [weak self] _ in
+            ) { [weak self] event in
+                // Inertial ("momentum") scroll events keep arriving for a
+                // second or two after the fingers have already left the
+                // trackpad. They are the tail of a gesture that has ended, not
+                // new input, so treating them as an interrupt discards a tap
+                // the user makes while the view is still gliding — another way
+                // the key "needs pressing twice". Real user scrolling has an
+                // empty momentumPhase and still counts (⌘+scroll is a genuine
+                // combination in many apps).
+                if event.type == .scrollWheel && !event.momentumPhase.isEmpty { return }
                 MainActor.assumeIsolated { self?.interrupted = true }
             }
         } else {
@@ -228,10 +245,36 @@ final class SingleKeyHotkeyMonitor {
         flagsMonitor = nil
         interruptMonitor = nil
         keyDownAt = nil
+        keyDownProcessedAt = nil
         interrupted = false
         targetKeyCode = nil
     }
 
+    /// Decides whether a press/release pair was a tap.
+    ///
+    /// The interval is measured with `NSEvent.timestamp` (seconds since system
+    /// startup, stamped by the window server when the key physically moved),
+    /// **not** `Date()` read at handler entry. Reading the clock in the handler
+    /// measures `physical tap duration + however long the app was delayed
+    /// between the two callbacks`, which is the wrong quantity in both
+    /// directions:
+    ///
+    ///   - False negative (the reported bug): this app is `LSUIElement`, so a
+    ///     long-idle instance is an App Nap candidate. When its main thread is
+    ///     throttled between the press and the release, a genuinely fast tap
+    ///     measures over the window and is discarded — the user presses the key
+    ///     and nothing happens, then it "works after a few tries" once the app
+    ///     is warm again. `Date()` is also wall clock, so an NTP step after
+    ///     wake (exactly when this is reported) can add a jump on its own.
+    ///   - False positive: while the app *is* responsive, both reads land back
+    ///     to back, so even a deliberate multi-second hold measured under the
+    ///     window and fired. The tap/hold distinction was not actually being
+    ///     enforced.
+    ///
+    /// Both failure modes are covered by the `--test-hotkey-clock` launch hook,
+    /// which drives this method with fabricated events (explicit timestamps,
+    /// processing delay injected independently). Restoring the old clock drops
+    /// it from 6/6 to 3/6, so the test genuinely pins this behaviour.
     private func handleFlagsChanged(_ event: NSEvent) {
         guard let targetKeyCode else { return }
 
@@ -244,20 +287,65 @@ final class SingleKeyHotkeyMonitor {
 
         let isDown = event.modifierFlags.contains(Self.flag(for: targetKeyCode))
         if isDown {
-            keyDownAt = Date()
+            keyDownAt = event.timestamp
+            keyDownProcessedAt = Date()
             interrupted = false
             return
         }
 
         // Key-up: evaluate whether this was a clean, fast, uninterrupted tap.
+        let processedAt = keyDownProcessedAt
         defer {
             keyDownAt = nil
+            keyDownProcessedAt = nil
             interrupted = false
         }
-        guard let keyDownAt else { return }
+
+        guard let keyDownAt else {
+            // Release with no press recorded: the press event never reached us
+            // (dropped/coalesced while the app was throttled, or the monitor was
+            // re-armed mid-press). Costs the user one press, so it must not be
+            // silent (§ pitfall 7).
+            HwhisperLog.log("hotkey: release with no matching press — ignored (press event never arrived; costs one press)")
+            return
+        }
+
+        // How far behind real time the app was running across this press. Large
+        // values are the field evidence for an App Nap / scheduling stall, and
+        // are exactly what the old `Date()`-based check was mistaking for a hold.
+        let lag: TimeInterval? = processedAt.map { Date().timeIntervalSince($0) - (event.timestamp - keyDownAt) }
+        let lagNote = lag.map { String(format: ", app processing lag %.3fs", max(0, $0)) } ?? ""
+
+        // A combination (right-⌘+C and friends). This is the designed outcome,
+        // not a failure, and logging it would flood the log on ordinary
+        // shortcut use — so it stays quiet.
         guard !interrupted else { return }
-        guard Date().timeIntervalSince(keyDownAt) <= Self.tapWindow else { return }
+
+        let held = event.timestamp - keyDownAt
+        guard held <= Self.tapWindow else {
+            HwhisperLog.log(String(format: "hotkey: ignored — key held %.3fs (tap window %.2fs)", held, Self.tapWindow) + lagNote)
+            return
+        }
+
+        HwhisperLog.log(String(format: "hotkey: tap detected (held %.3fs", held) + lagNote + ")")
         onTap()
+    }
+
+    /// Test hook (`--test-hotkey-clock`): arms the detector for `mode` without
+    /// installing any global monitor, so the tap decision can be exercised
+    /// without Input Monitoring permission, a real keyboard, or synthesizing
+    /// system-wide key events (unsafe when a messenger is frontmost).
+    func armForTesting(mode: HotkeyMode) {
+        targetKeyCode = mode.singleKeyCode
+        keyDownAt = nil
+        keyDownProcessedAt = nil
+        interrupted = false
+    }
+
+    /// Test hook: feeds one fabricated flags-changed event through the real
+    /// decision path.
+    func injectForTesting(_ event: NSEvent) {
+        handleFlagsChanged(event)
     }
 
     /// Maps the physical key back to the modifier bit it sets in

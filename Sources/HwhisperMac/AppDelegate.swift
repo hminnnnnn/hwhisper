@@ -165,6 +165,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         self?.handleHotkeyToggle()
     }
     private var hotkeyModeObserver: NSObjectProtocol?
+    /// Keeps the app out of App Nap. hwhisper is `LSUIElement` and spends most
+    /// of its life doing nothing, which makes it a prime nap candidate — but
+    /// its whole job is to answer a global hotkey instantly, and a napped app's
+    /// main thread is throttled enough to delay (or drop) the very key events
+    /// it exists to observe. `.userInitiatedAllowingIdleSystemSleep` opts out
+    /// of nap without holding the *system* awake, so the Mac still sleeps
+    /// normally. Held for the process lifetime; releasing it re-enables nap.
+    private var appNapToken: NSObjectProtocol?
+    /// Re-arms the global hotkey monitors after the machine wakes. The event
+    /// taps behind `NSEvent.addGlobalMonitorForEvents` can stop delivering
+    /// across a sleep/wake cycle, and nothing else in the app would ever notice
+    /// — before this, the only recovery was quitting and relaunching.
+    private var wakeObservers: [NSObjectProtocol] = []
+    /// Input Monitoring is requested at most once per launch — see `applyHotkeyMode`.
+    private var hasRequestedInputMonitoring = false
     /// Provider rawValue → API key, populated after the first successful
     /// Keychain read so the (potentially prompt-blocking) read happens at
     /// most once per provider per run. Cleared when the key is re-saved.
@@ -269,6 +284,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             Task { @MainActor in self?.apiKeyCache.removeAll() }
         }
 
+        beginHotkeyResponsivenessActivity()
+
         applyHotkeyMode()
         hotkeyModeObserver = NotificationCenter.default.addObserver(
             forName: .hotkeyModeDidChange,
@@ -277,6 +294,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         ) { [weak self] _ in
             Task { @MainActor in self?.applyHotkeyMode() }
         }
+        observeWakeToReArmHotkey()
 
         audioCapture.onLevelUpdate = { [weak self] level in
             Task { @MainActor in
@@ -400,6 +418,42 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if arguments.contains("--test-indicator") {
             recordingIndicator.showListening()
             recordingIndicator.updateLevel(0.6)
+        }
+        // Test-only: exercises the single-key tap detector against fabricated
+        // press/release events. Covers the regression that made the hotkey
+        // "need pressing several times" after the app had been idle: the
+        // detector used to time the tap with `Date()` read at handler entry,
+        // which measures app-processing latency rather than how long the key
+        // was actually down. Uses no global monitor and no synthesized system
+        // events, so it is safe to run with anything frontmost.
+        if arguments.contains("--test-hotkey-clock") {
+            runHotkeyClockTest()
+        }
+        // Test-only: pins the home tab's week bucketing against a fixed "now"
+        // so the trend chart can't silently start dropping or misfiling weeks.
+        if arguments.contains("--test-home-stats") {
+            runHomeStatsTest()
+        }
+        // Test-only: cycles the home tab's period the same way the segmented
+        // picker does (writing the @AppStorage-backed default from inside the
+        // process), so the log shows whether changing the period actually
+        // recomputes the figures. Catches the regression where the stats task
+        // had no `id` and the numbers froze at whatever loaded first — the
+        // titles changed but every period showed identical values.
+        // Use with `--open-main --open-section home`.
+        if arguments.contains("--test-home-period-cycle") {
+            let sequence = ["week", "fourWeeks", "all"]
+            for (index, value) in sequence.enumerated() {
+                Timer.scheduledTimer(withTimeInterval: 1.5 * Double(index + 1), repeats: false) { _ in
+                    MainActor.assumeIsolated {
+                        HwhisperLog.log("test: home period → \(value)")
+                        UserDefaults.standard.set(value, forKey: "homeStatsPeriod")
+                    }
+                }
+            }
+            Timer.scheduledTimer(withTimeInterval: 1.5 * Double(sequence.count + 1), repeats: false) { _ in
+                exit(0)
+            }
         }
         // Test-only: renders the soft no-speech warning pill (design check
         // without needing a real silent recording).
@@ -752,6 +806,149 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// selection (§4 user feedback #1); a no-op stop when `.combination` is
     /// selected. The combination `KeyboardShortcuts` hotkey registered above
     /// is left running regardless of mode — both can fire simultaneously.
+    /// Drives the real `SingleKeyHotkeyMonitor` decision path with fabricated
+    /// press/release pairs, controlling the physical tap duration and the
+    /// app-side processing delay independently. Prints a table and exits
+    /// non-zero if any scenario is judged wrong.
+    private func runHotkeyClockTest() {
+        struct Scenario {
+            let name: String
+            let physicalTapMs: Int
+            let processingDelayMs: Int
+            let expectFire: Bool
+        }
+        let scenarios: [Scenario] = [
+            Scenario(name: "responsive app, quick tap", physicalTapMs: 80, processingDelayMs: 0, expectFire: true),
+            Scenario(name: "responsive app, deliberate 300ms tap", physicalTapMs: 300, processingDelayMs: 5, expectFire: true),
+            Scenario(name: "idle app: 80ms tap, 600ms stall", physicalTapMs: 80, processingDelayMs: 600, expectFire: true),
+            Scenario(name: "idle app: 120ms tap, 1200ms stall", physicalTapMs: 120, processingDelayMs: 1200, expectFire: true),
+            Scenario(name: "genuine hold, responsive app", physicalTapMs: 900, processingDelayMs: 0, expectFire: false),
+            Scenario(name: "genuine hold, stalled app", physicalTapMs: 900, processingDelayMs: 700, expectFire: false),
+        ]
+
+        func flagsEvent(down: Bool, at physicalTime: TimeInterval) -> NSEvent? {
+            NSEvent.keyEvent(
+                with: .flagsChanged,
+                location: .zero,
+                modifierFlags: down ? [.command] : [],
+                timestamp: physicalTime,
+                windowNumber: 0,
+                context: nil,
+                characters: "",
+                charactersIgnoringModifiers: "",
+                isARepeat: false,
+                keyCode: 54 // right ⌘
+            )
+        }
+
+        var failures = 0
+        print("hotkey tap-detector check (tap window 0.5s)\n")
+        for s in scenarios {
+            var fired = false
+            let monitor = SingleKeyHotkeyMonitor { fired = true }
+            monitor.armForTesting(mode: .singleKeyRightCommand)
+
+            // Boot-relative origin; only the difference is meaningful.
+            let origin: TimeInterval = 42_000
+            guard let down = flagsEvent(down: true, at: origin),
+                  let up = flagsEvent(down: false, at: origin + Double(s.physicalTapMs) / 1000.0) else {
+                print("could not fabricate events — aborting"); exit(2)
+            }
+
+            monitor.injectForTesting(down)
+            if s.processingDelayMs > 0 {
+                Thread.sleep(forTimeInterval: Double(s.processingDelayMs) / 1000.0)
+            }
+            monitor.injectForTesting(up)
+
+            let ok = fired == s.expectFire
+            if !ok { failures += 1 }
+            print(String(format: "  %@  %-38@ tap %4dms  stall %4dms  → %@",
+                         (ok ? "✅" : "❌") as NSString,
+                         s.name as NSString,
+                         s.physicalTapMs, s.processingDelayMs,
+                         (fired ? "fires" : "ignored") as NSString))
+        }
+        print("\n\(scenarios.count - failures)/\(scenarios.count) scenarios correct")
+        exit(failures == 0 ? 0 : 1)
+    }
+
+    /// Checks the home tab's week bucketing against a fixed "now", so the
+    /// trend chart's assignment of dictations to weeks is pinned. Pure
+    /// function, no database, no UI — safe to run anywhere.
+    private func runHomeStatsTest() {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(identifier: "Asia/Seoul") ?? .current
+        calendar.locale = Locale(identifier: "ko_KR")
+
+        // Fixed reference point: 2026-08-14 12:00 KST (a Friday).
+        var components = DateComponents()
+        components.year = 2026; components.month = 8; components.day = 14; components.hour = 12
+        guard let now = calendar.date(from: components),
+              let thisWeekStart = calendar.dateInterval(of: .weekOfYear, for: now)?.start else {
+            print("could not build reference date"); exit(2)
+        }
+
+        func daysBefore(_ days: Int) -> Date { calendar.date(byAdding: .day, value: -days, to: now)! }
+        let points: [HistoryMetricPoint] = [
+            .init(createdAt: now, durationSeconds: 60, words: 100),            // 이번 주
+            .init(createdAt: daysBefore(1), durationSeconds: 30, words: 50),   // 이번 주
+            .init(createdAt: daysBefore(21), durationSeconds: 90, words: 200), // 3주 전
+            .init(createdAt: daysBefore(400), durationSeconds: 10, words: 10), // 8주보다 오래 전 → 제외
+        ]
+        let buckets = HomeView.bucketByWeek(points, calendar: calendar, now: now)
+
+        var failures = 0
+        func check(_ label: String, _ condition: Bool) {
+            print("  \(condition ? "✅" : "❌")  \(label)")
+            if !condition { failures += 1 }
+        }
+
+        check("최근 8주 = 버킷 8개", buckets.count == 8)
+        check("마지막 버킷이 이번 주", buckets.last?.weekStart == thisWeekStart)
+        check("버킷이 주 간격으로 오름차순", zip(buckets, buckets.dropFirst()).allSatisfy {
+            calendar.dateComponents([.day], from: $0.weekStart, to: $1.weekStart).day == 7
+        })
+        check("이번 주에 2건·90초·150단어", buckets.last?.dictations == 2 && buckets.last?.speechSeconds == 90 && buckets.last?.words == 150)
+        check("3주 전 버킷에 1건", buckets[buckets.count - 4].dictations == 1)
+        check("8주보다 오래된 기록은 제외", buckets.reduce(0) { $0 + $1.dictations } == 3)
+        check("기록 없는 주도 버킷으로 남음", buckets.contains { $0.dictations == 0 })
+
+        print("\n\(7 - failures)/7 checks passed")
+        exit(failures == 0 ? 0 : 1)
+    }
+
+    /// Opts out of App Nap for the life of the process — see `appNapToken`.
+    private func beginHotkeyResponsivenessActivity() {
+        guard appNapToken == nil else { return }
+        appNapToken = ProcessInfo.processInfo.beginActivity(
+            options: [.userInitiatedAllowingIdleSystemSleep],
+            reason: "Global dictation hotkey must stay responsive while idle"
+        )
+        HwhisperLog.log("App Nap suppressed (hotkey responsiveness activity begun)")
+    }
+
+    /// Rebuilds the global hotkey monitors after a wake. Cheap (removing and
+    /// re-adding two `NSEvent` monitors), and it is the only thing that can
+    /// recover a tap that the system stopped delivering to while asleep.
+    private func observeWakeToReArmHotkey() {
+        let center = NSWorkspace.shared.notificationCenter
+        let names: [Notification.Name] = [
+            NSWorkspace.didWakeNotification,
+            NSWorkspace.screensDidWakeNotification,
+            NSWorkspace.sessionDidBecomeActiveNotification,
+        ]
+        wakeObservers = names.map { name in
+            center.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
+                MainActor.assumeIsolated {
+                    guard let self else { return }
+                    HwhisperLog.log("woke (\(name.rawValue)) — re-arming hotkey monitors")
+                    self.applyHotkeyMode()
+                }
+            }
+        }
+    }
+
     private func applyHotkeyMode() {
         let mode = HotkeyMode.current
         guard mode != .combination else {
@@ -764,9 +961,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // of this app relies on (AX reads, CGEvent posting). Request it
         // explicitly rather than silently registering a monitor that may
         // never see events.
+        // Ask at most once per launch. `applyHotkeyMode` now also runs on every
+        // wake (to re-arm the monitors), and re-requesting each time would
+        // nag a user who has deliberately declined — once is informative,
+        // every wake is harassment.
         if !CGPreflightListenEventAccess() {
-            HwhisperLog.log("Input Monitoring not yet granted; requesting (required for single-key hotkey mode: \(mode.displayName))")
-            _ = CGRequestListenEventAccess()
+            if !hasRequestedInputMonitoring {
+                hasRequestedInputMonitoring = true
+                HwhisperLog.log("Input Monitoring not yet granted; requesting (required for single-key hotkey mode: \(mode.displayName))")
+                _ = CGRequestListenEventAccess()
+            } else {
+                HwhisperLog.log("Input Monitoring still not granted — single-key hotkey will not receive events")
+            }
         }
 
         singleKeyHotkeyMonitor.start(mode: mode)
