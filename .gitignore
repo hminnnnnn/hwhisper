@@ -43,3 +43,4 @@ fixtures/audio/
 
 # 로컬 디버깅 기록 — 개인 사용 통계(건수·날짜)가 들어가므로 공개 저장소 제외
 .claude/*-verification.md
+.claude/rules/
