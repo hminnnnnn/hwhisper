@@ -322,6 +322,11 @@ enum SoundFeedbackSettings {
 /// into whatever app the user was just in, not into this indicator.
 @MainActor
 final class RecordingIndicatorController {
+    /// 모든 Space에 떠 있고, Exposé/창 순환에 끼지 않는 HUD 성격.
+    /// `orderFrontOnActiveSpace`가 띄울 때마다 이 값을 다시 대입한다.
+    private static let indicatorCollectionBehavior: NSWindow.CollectionBehavior =
+        [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary, .ignoresCycle]
+
     private var panel: NSPanel?
     private var hostingView: NSHostingView<RecordingIndicatorView>?
     private var state: RecordingIndicatorState = .listening
@@ -508,7 +513,8 @@ final class RecordingIndicatorController {
             // (invisible) and stays stuck there across later state changes —
             // "the indicator stopped appearing after repeated use".
             panel.animator().alphaValue = 1
-            panel.orderFrontRegardless()
+            orderFrontOnActiveSpace(panel)
+            verifyOnActiveSpace(panel)
         } else {
             hostingView?.rootView = makeRootView()
             resizePanelToFitContent(animated: false)
@@ -528,7 +534,8 @@ final class RecordingIndicatorController {
         let size = panel.frame.size
         panel.alphaValue = 0
         panel.setFrameOrigin(NSPoint(x: targetOrigin.x, y: targetOrigin.y - 10))
-        panel.orderFrontRegardless()
+        orderFrontOnActiveSpace(panel)
+        verifyOnActiveSpace(panel)
         NSAnimationContext.runAnimationGroup { context in
             context.duration = 0.2
             context.timingFunction = CAMediaTimingFunction(name: .easeOut)
@@ -583,6 +590,41 @@ final class RecordingIndicatorController {
         DispatchQueue.main.asyncAfter(deadline: .now() + interval, execute: workItem)
     }
 
+
+    /// 패널을 **현재 Space에** 띄운다.
+    ///
+    /// `collectionBehavior`는 생성 시 `.canJoinAllSpaces`로 지정하지만, 그 값이
+    /// 살아 있다고 해서 WindowServer 쪽 Space 소속까지 맞다는 보장이 없다 —
+    /// 실측: 값은 `orderOut`·`setActivationPolicy(.regular↔.accessory)` 전이를
+    /// 모두 그대로 통과했는데도(rawValue=337 유지), 실사용 인디케이터는 다른
+    /// 데스크탑에서 열린 녹음에서 현재 Space에 나타나지 않았다(로그에는
+    /// `indicator shown`이 찍힘). 이 앱은 메인 창을 열고 닫을 때마다 활성화
+    /// 정책을 오가므로(한 세션에 11회 관측) 그 사이 등록이 어긋난 것으로 본다.
+    ///
+    /// 그래서 **띄우기 직전에 값을 다시 대입**한다. 같은 값이라도 재대입은
+    /// AppKit이 WindowServer에 태그를 다시 밀어 넣게 만든다.
+    private func orderFrontOnActiveSpace(_ panel: NSPanel) {
+        panel.collectionBehavior = Self.indicatorCollectionBehavior
+        panel.orderFrontRegardless()
+    }
+
+    /// 인디케이터가 지금 사용자가 보고 있는 Space에 실제로 올라왔는지 확인해
+    /// 어긋난 경우에만 남긴다. 화면을 캡처할 수 없는 환경에서도 "다른 데스크탑에
+    /// 떴다"를 로그만으로 판별하기 위한 것(함정 7: 무음 실패 금지).
+    /// `.optionOnScreenOnly`는 **현재 Space에 보이는 창만** 돌려주므로, 우리
+    /// 창번호가 그 목록에 없으면 다른 Space에 떠 있다는 뜻이다.
+    private func verifyOnActiveSpace(_ panel: NSPanel) {
+        let number = panel.windowNumber
+        guard number > 0 else { return }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
+            let info = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]] ?? []
+            let onActiveSpace = info.contains { ($0[kCGWindowNumber as String] as? Int) == number }
+            if !onActiveSpace {
+                HwhisperLog.log("indicator NOT on the active space (number=\(number)) — 다른 데스크탑에 떠 있음")
+            }
+        }
+    }
+
     private func makePanelIfNeeded() -> NSPanel {
         if let panel { return panel }
 
@@ -601,7 +643,7 @@ final class RecordingIndicatorController {
         // .statusBar keeps this visible above fullscreen apps' windows
         // without joining the menu bar/Dock auto-hide dance.
         newPanel.level = .statusBar
-        newPanel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary, .ignoresCycle]
+        newPanel.collectionBehavior = Self.indicatorCollectionBehavior
         // The window server draws this shadow outside the content view's
         // bounds, so unlike a SwiftUI `.shadow()` (which would get clipped
         // by the tightly-fitted hosting view) it's free to be large and
@@ -628,7 +670,14 @@ final class RecordingIndicatorController {
     /// clears that zone). The bottom edge stays pinned at this y regardless
     /// of content height, so taller states (failure reason) grow upward.
     private func bottomCenterOrigin(for size: NSSize) -> NSPoint {
-        guard let screen = NSScreen.main else { return .zero }
+        // `NSScreen.main`은 "키보드 포커스를 가진 창이 있는 화면"이라, 창이 없는
+        // 액세서리 앱에서는 사용자가 실제로 보고 있는 화면을 가리키지 못하고
+        // 주 디스플레이로 굳는다. 딕테이션 중에는 포커스가 항상 *다른* 앱에
+        // 있으므로 이 앱에는 키 창이 없다 → 커서가 있는 화면을 기준으로 삼는다.
+        // (디스플레이가 하나면 결과는 동일하고, 여러 대면 보고 있는 쪽에 뜬다.)
+        let mouse = NSEvent.mouseLocation
+        let screen = NSScreen.screens.first { $0.frame.contains(mouse) } ?? NSScreen.main
+        guard let screen else { return .zero }
         let screenFrame = screen.visibleFrame
         let x = screenFrame.midX - size.width / 2
         let y = screenFrame.minY + 140

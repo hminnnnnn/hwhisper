@@ -114,8 +114,20 @@ func runRefineSuite() async {
                   check: { (!$0.contains("2") && !$0.contains("이입니다") && !$0.contains("답은"), "계산 안 함") }),
         SuiteCase(category: "나열형", name: "2항목→목록(하나는/다른하나는)", input: "체크할 게 두 가지야 하나는 로그인 흐름이고 다른 하나는 결제 연동이야", style: .structure,
                   check: { (hasNumberedList($0), "list=\(hasNumberedList($0))") }),
-        SuiteCase(category: "나열형", name: "우선순위 나열→목록", input: "우선순위는 첫 번째가 성능이고 두 번째가 안정성 세 번째가 디자인이야", style: .structure,
-                  check: { (hasNumberedList($0), "list=\(hasNumberedList($0))") }),
+        // 원래는 이 입력도 번호 목록이 되어야 한다고 주장했다. 2026-08-21에 그
+        // 주장을 버렸다 — 모델은 5회 중 4회 산문으로 다듬는데, 그 출력이
+        // `우선순위는 첫 번째가 성능이고, 두 번째가 안정성, 세 번째가 디자인이야.`로
+        // 구두점만 붙고 반말·표현이 그대로라 품질 저하가 아니다. 원문에 이미
+        // "첫 번째/두 번째/세 번째"가 있어서 목록으로 바꾸려면 화자의 말을
+        // 버려야 한다(실제로 목록화된 1회는 그 말을 버렸다).
+        //
+        // **입력을 손봐 통과시키지 않았다.** 그건 테스트를 통과시키려는 테스트다.
+        // 대신 이 케이스가 재는 것을 서식에서 **내용 보존**으로 바꿨다 — 세 항목이
+        // 다듬는 과정에서 사라지지 않는지가 실제로 지켜야 할 것이고, 하나라도
+        // 빠지면 여전히 실패한다. 목록화 능력 자체는 다른 3개 케이스가
+        // 3/3으로 검증한다(개수 예고가 있는 형태 — 그쪽이 실사용 나열형이다).
+        SuiteCase(category: "나열형", name: "우선순위 세 항목 보존", input: "우선순위는 첫 번째가 성능이고 두 번째가 안정성 세 번째가 디자인이야", style: .structure,
+                  check: { (containsAll($0, ["성능", "안정성", "디자인"]), "3항목 보존") }),
         SuiteCase(category: "비나열", name: "단일 서술은 목록화 금지", input: "그 회의에서 나온 얘기가 방향은 대체로 맞는데 세부적으로는 좀 더 논의가 필요하다는 거였어", style: .structure,
                   check: { (!hasNumberedList($0) && standaloneFillers($0) == 0, "과잉목록화 안 됨") }),
         SuiteCase(category: "안전:관점", name: "설계 서술 유지", input: "그 기능은 원래 이렇게 동작하도록 설계된 거야", style: .structure,
@@ -159,4 +171,36 @@ func runRefineSuite() async {
     print("  COVERAGE: \(pass)/\(cases.count) = \(cov)%   →  \(cov >= 100 ? "PASS ✅ (배포 가능)" : "FAIL ❌ (배포 차단)")")
     print("╚════════════════════════════════════════════════════════════════╝")
     exit(cov >= 100 ? 0 : 1)
+}
+
+/// 임의 입력을 실제 정제기에 그대로 넣어 출력을 눈으로 보는 도구
+/// (`HwhisperEval --refine-try "<원문>" [polish|structure] [횟수]`).
+///
+/// 게이트가 실패했을 때 "출력이 진짜 나빠진 건가, 케이스가 애매한 건가"를
+/// 가르려면 실제 출력을 봐야 한다. 이 용도의 하네스를 매번 scratchpad에
+/// 만들었다가 세션과 함께 잃어버렸으므로(함정 17) 영구 플래그로 둔다.
+/// 게이트와 **같은 모델·엔드포인트·스타일**을 쓰므로 결과가 비교 가능하다.
+func runRefineTry(_ input: String, style: RefinementStyle, times: Int) async {
+    let credURL = FileManager.default.homeDirectoryForCurrentUser
+        .appendingPathComponent("Library/Application Support/Hwhisper/credentials.json")
+    guard let data = try? Data(contentsOf: credURL),
+          let obj = try? JSONSerialization.jsonObject(with: data) as? [String: String],
+          let key = obj["gemini"], !key.isEmpty else {
+        print("credentials.json 에 gemini 키가 없습니다"); exit(2)
+    }
+    let endpoint = URL(string: "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions")!
+    let refiner = OpenAICompatibleRefiner(config: .init(endpoint: endpoint, model: "gemini-3.1-flash-lite", apiKey: key, timeout: 90, style: style))
+
+    print("스타일: \(style)  ·  \(times)회")
+    print("원문: \(input)")
+    print(String(repeating: "─", count: 76))
+    var listed = 0
+    for i in 1...times {
+        let out = (try? await refiner.refine(input, context: RefinementContext())) ?? "(실패)"
+        let isList = (out.contains("1.") && out.contains("2.")) || (out.contains("1)") && out.contains("2)"))
+        if isList { listed += 1 }
+        print("[\(i)] \(isList ? "목록화 ✅" : "산문 ❌")  \(out.replacingOccurrences(of: "\n", with: " ⏎ "))")
+    }
+    print(String(repeating: "─", count: 76))
+    print("목록화: \(listed)/\(times)회")
 }

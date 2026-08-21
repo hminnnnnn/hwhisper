@@ -456,6 +456,17 @@ let arguments = CommandLine.arguments
 if arguments.contains("--refine-suite") {
     await runRefineSuite()  // exits 0 (100% coverage) or non-zero — release gate
 }
+if let i = arguments.firstIndex(of: "--refine-try") {
+    guard i + 1 < arguments.count else {
+        print("usage: HwhisperEval --refine-try \"<원문>\" [polish|structure] [횟수]")
+        exit(1)
+    }
+    let text = arguments[i + 1]
+    let style: RefinementStyle = (i + 2 < arguments.count && arguments[i + 2] == "polish") ? .polish : .structure
+    let times = (i + 3 < arguments.count) ? (Int(arguments[i + 3]) ?? 3) : 3
+    await runRefineTry(text, style: style, times: times)
+    exit(0)
+}
 if let probeFlagIndex = arguments.firstIndex(of: "--probe") {
     guard probeFlagIndex + 1 < arguments.count else {
         print("usage: HwhisperEval --probe <fixtureID>  (e.g. --probe ko-01)")

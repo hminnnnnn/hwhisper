@@ -27,6 +27,7 @@
 |---|---|---|
 | `--test-hotkey-clock` | 단일키 탭 판정 6종 (함정 27) | 완전 안전 |
 | `--test-home-stats` | 홈 주간 추이 버킷 7종 | 완전 안전 |
+| `--test-history-aggregate` | 히스토리 집계 == 행별 합계, `word_count` 백필 정확·멱등, `metrics`==`aggregate` | 안전 — **실 DB 사본**에서만 돌고 끝나면 지움 |
 | `--test-home-period-cycle` | 구간 전환이 재계산을 유발하는지 | 안전. **`-homeStatsPeriod` 인자와 함께 쓰지 말 것**(NSArgumentDomain이 가림) |
 | `--test-indicator` / `--test-warning` / `--test-countdown` / `--test-refining-slow` / `--test-indicator-race` | 인디케이터 렌더·레이스 | 안전(창 캡처용) |
 | `--open-main` / `--open-onboarding` / `--open-settings` | 창 표시 (`--no-activate`로 포커스 유지) | 안전 |

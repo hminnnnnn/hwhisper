@@ -260,6 +260,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        // 첫 로그보다 먼저 켜야 이 실행의 모든 줄에 표식이 붙는다. 합성 실행이
+        // 운영 로그의 진단 신호를 오염시키면 회귀 감지 자체가 무력해진다.
+        HwhisperLog.isTestRun = ProcessInfo.processInfo.arguments.contains { $0.hasPrefix("--test-") }
         HwhisperLog.logLaunchHeader()
         migrateKeychainCredentialsIfNeeded()
         NSApp.setActivationPolicy(.accessory)
@@ -433,6 +436,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // so the trend chart can't silently start dropping or misfiling weeks.
         if arguments.contains("--test-home-stats") {
             runHomeStatsTest()
+        }
+        // Test-only: 히스토리 집계가 행 단위 합계와 어긋나지 않는지 실 DB 사본으로 검사.
+        if arguments.contains("--test-history-aggregate") {
+            runHistoryAggregateTest()
         }
         // Test-only: cycles the home tab's period the same way the segmented
         // picker does (writing the @AppStorage-backed default from inside the
@@ -871,6 +878,70 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         print("\n\(scenarios.count - failures)/\(scenarios.count) scenarios correct")
         exit(failures == 0 ? 0 : 1)
+    }
+
+    /// 히스토리 집계(`aggregate`/`metrics`/`appCounts`)가 행 단위 합계와 일치하는지,
+    /// `word_count` 백필이 멱등인지 검사한다. **실 DB를 복사한 사본에서만** 돌기
+    /// 때문에 사용자의 기록을 건드리지 않는다.
+    ///
+    /// 원래 scratchpad 하네스로 검증했는데 세션이 끝나며 사라졌다 — 검증 원칙대로
+    /// 영구 훅으로 승격시킨 것(같은 실수를 막으려고 규칙까지 적어둔 참이었다).
+    private func runHistoryAggregateTest() {
+        let live = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("Hwhisper/history.sqlite3")
+        let copy = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("hwhisper-aggregate-check-\(UUID().uuidString).sqlite3")
+        do {
+            try FileManager.default.copyItem(at: live, to: copy)
+        } catch {
+            print("실 DB를 복사할 수 없습니다: \(error)"); exit(2)
+        }
+        let store = SQLiteHistoryStore(databaseURL: copy)
+        var failures = 0
+        func check(_ label: String, _ ok: Bool, _ detail: String = "") {
+            print("  \(ok ? "✅" : "❌")  \(label)\(detail.isEmpty ? "" : "  — \(detail)")")
+            if !ok { failures += 1 }
+        }
+
+        // `Task {}` 는 이 MainActor 컨텍스트를 상속한다 — 세마포어로 메인 스레드를
+        // 막으면 Task 가 실행될 기회를 잃고 그대로 멈춘다(실제로 걸렸다).
+        // 런루프를 살려 두고 Task 안에서 종료한다.
+        Task {
+            do {
+                let all = try await store.aggregate(since: nil)
+                let rows = try await store.items(since: Date(timeIntervalSince1970: 0))
+                let expectedWords = rows.reduce(0) { $0 + TranscriptMetrics.wordCount($1.insertedText) }
+                let expectedSecs = rows.reduce(0.0) { $0 + $1.durationSeconds }
+
+                print("  대상: \(all.dictations)건, \(String(format: "%.1f", all.speechSeconds/60))분, \(all.words)단어\n")
+                check("SQL 집계 건수 == 행 수", all.dictations == rows.count, "\(all.dictations) vs \(rows.count)")
+                check("SQL 발화시간 == 행별 합계", abs(all.speechSeconds - expectedSecs) < 0.01)
+                check("SQL 단어수 == 행별 합계(백필 정확)", all.words == expectedWords, "\(all.words) vs \(expectedWords)")
+
+                // 재오픈 시 백필이 값을 바꾸지 않아야 한다(멱등).
+                let again = try await SQLiteHistoryStore(databaseURL: copy).aggregate(since: nil)
+                check("백필 멱등(재오픈 후 동일)", again == all)
+
+                // 차트 소스와 카드 숫자가 어긋나면 화면이 자기모순이 된다.
+                let pts = try await store.metrics(since: nil)
+                check("metrics 합계 == aggregate 합계",
+                      pts.count == all.dictations && pts.reduce(0) { $0 + $1.words } == all.words)
+
+                // 구간 집계는 전체의 부분집합이어야 한다.
+                let weekStart = Calendar.current.dateInterval(of: .weekOfYear, for: Date())?.start ?? Date()
+                let week = try await store.aggregate(since: weekStart)
+                check("구간 집계 ⊆ 전체", week.dictations <= all.dictations && week.words <= all.words)
+
+                // 앱별 집계가 전체 건수를 넘을 수 없다.
+                let apps = try await store.appCounts(since: nil)
+                check("앱별 합계 ≤ 전체 건수", apps.reduce(0) { $0 + $1.count } <= all.dictations)
+            } catch {
+                print("  ❌ 예외: \(error)"); failures += 1
+            }
+            print("\n\(failures == 0 ? "모든 검사 통과" : "\(failures)건 실패")")
+            try? FileManager.default.removeItem(at: copy)
+            exit(failures == 0 ? 0 : 1)
+        }
     }
 
     /// Checks the home tab's week bucketing against a fixed "now", so the
