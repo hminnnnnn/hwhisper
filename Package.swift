@@ -26,7 +26,7 @@ let package = Package(
         // Pinned <1.16.0: 1.16.0+ (through 3.x) ships #Preview blocks that fail to compile on
         // CLT-only hosts (no PreviewsMacros plugin without full Xcode). 1.15.0 is the last clean
         // release and has the same onKeyDown/onKeyUp/setShortcut API surface we use.
-        .package(url: "https://github.com/sindresorhus/KeyboardShortcuts", "1.9.0"..<"1.16.0"),
+        .package(url: "https://github.com/sindresorhus/KeyboardShortcuts", exact: "1.15.0"),
         // WhisperKit (B2 engine) — linked into HwhisperCore behind the SpeechRecognizer protocol (§3).
         .package(url: "https://github.com/argmaxinc/WhisperKit", from: "1.0.0")
     ],

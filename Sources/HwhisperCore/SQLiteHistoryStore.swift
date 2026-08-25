@@ -8,7 +8,9 @@ private let sqliteTransient = unsafeBitCast(-1, to: sqlite3_destructor_type.self
 
 /// SQLite-backed `HistoryStore`.
 ///
-/// Search is a plain indexed-scan `LIKE '%query%'` rather than FTS5: the
+/// Search is a plain `LIKE '%query%'` table scan rather than FTS5 (a
+/// leading `%` can never use an index — the created_at index only supplies
+/// the result ordering): the
 /// system FTS5 tokenizer (unicode61) splits on whitespace and only matches
 /// token *prefixes*, which makes Korean substring queries ("어제 회의" inside
 /// a longer compound) silently miss — LIKE is substring-correct for Korean
@@ -99,11 +101,31 @@ public actor SQLiteHistoryStore: HistoryStore {
         return handle
     }
 
+    /// Schema epoch stored in SQLite's `PRAGMA user_version`. ≥1 means the
+    /// `word_count` backfill has completed, so opens can skip the "any rows
+    /// left to fill?" scan — that scan is a full table scan on an unindexed
+    /// predicate, and running it on EVERY launch forever only holds up while
+    /// the table stays small. Living in the DB file itself, the marker
+    /// travels with backups: restoring an old DB re-triggers the backfill
+    /// correctly.
+    private static let schemaEpochBackfilled: Int32 = 1
+
     /// One-time fill of `word_count` for rows written before the column
-    /// existed. Runs on first open after the migration; afterwards the
-    /// `word_count < 0` predicate matches nothing and this is a single
-    /// indexless scan of an already-small table.
+    /// existed. Gated by `PRAGMA user_version` so it runs exactly once per
+    /// database, not once per launch.
     private func backfillWordCounts(_ db: OpaquePointer) {
+        var epoch: Int32 = 0
+        var pragma: OpaquePointer?
+        if sqlite3_prepare_v2(db, "PRAGMA user_version", -1, &pragma, nil) == SQLITE_OK,
+           sqlite3_step(pragma) == SQLITE_ROW {
+            epoch = sqlite3_column_int(pragma, 0)
+        }
+        sqlite3_finalize(pragma)
+        guard epoch < Self.schemaEpochBackfilled else { return }
+        defer {
+            sqlite3_exec(db, "PRAGMA user_version = \(Self.schemaEpochBackfilled)", nil, nil, nil)
+        }
+
         var select: OpaquePointer?
         guard sqlite3_prepare_v2(db, "SELECT id, raw_text, refined_text FROM history WHERE word_count < 0", -1, &select, nil) == SQLITE_OK else { return }
         var pending: [(id: String, words: Int)] = []

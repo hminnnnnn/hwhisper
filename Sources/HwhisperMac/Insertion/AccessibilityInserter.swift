@@ -36,6 +36,13 @@ struct AccessibilityInserter: InsertionStrategy {
 
         let beforeValue = Self.stringAttribute(focusedElement, kAXValueAttribute as String)
 
+        // TOCTOU re-check immediately before the write (InsertionStrategy
+        // contract): the AX round-trips above take real time, and focus can
+        // land in a password field meanwhile.
+        guard !SecureInputGuard.isSecureInputActive() else {
+            return .failed("refused: secure input became active before AX write")
+        }
+
         let result = AXUIElementSetAttributeValue(focusedElement, kAXSelectedTextAttribute as CFString, text as CFString)
         guard result == .success else {
             return .failed("AXUIElementSetAttributeValue failed (\(result.rawValue))")

@@ -397,6 +397,12 @@ struct SettingsView: View {
         guard let url = URL(string: endpointString), !endpointString.isEmpty else {
             connTestState = .failure("엔드포인트 설정 오류"); return
         }
+        // Same policy gate as the real pipeline — without it this test used
+        // to report "인증되었습니다" for an endpoint the pipeline would then
+        // silently refuse (and an http:// test would send the key cleartext).
+        if let rejection = RefinerEndpointPolicy.rejectionReason(for: url) {
+            connTestState = .failure(rejection); return
+        }
         let config = OpenAICompatibleRefinerConfig(
             endpoint: url, model: model,
             apiKey: apiKey.isEmpty ? nil : apiKey, timeout: 12, style: .polish

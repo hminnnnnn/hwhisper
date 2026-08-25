@@ -160,7 +160,6 @@ public actor FilePersonalDictionary: PersonalDictionary {
     }
 
     private func save(_ entries: [DictionaryEntry]) {
-        cached = entries
         do {
             let directory = fileURL.deletingLastPathComponent()
             try FileManager.default.createDirectory(
@@ -172,16 +171,31 @@ public actor FilePersonalDictionary: PersonalDictionary {
             encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
             let data = try encoder.encode(entries)
             // Atomic temp+rename (CredentialStore pattern) so a crash can't
-            // truncate the dictionary.
+            // truncate the dictionary. The temp file's mode is set AT
+            // CREATION (like CredentialStore) — `Data.write(options: .atomic)`
+            // lands 0644 under the default umask, briefly exposing entries
+            // before a chmod could run.
             let tempURL = directory.appendingPathComponent(".\(fileURL.lastPathComponent).tmp")
-            try data.write(to: tempURL, options: [.atomic])
-            try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: tempURL.path)
+            guard FileManager.default.createFile(
+                atPath: tempURL.path,
+                contents: data,
+                attributes: [.posixPermissions: 0o600]
+            ) else {
+                throw CocoaError(.fileWriteUnknown)
+            }
             _ = try FileManager.default.replaceItemAt(fileURL, withItemAt: tempURL)
             try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: fileURL.path)
+            // Commit the cache only after the write actually landed. Setting
+            // it first meant a failed write (disk full, perms) kept serving
+            // the phantom entries for the whole process lifetime — `load()`
+            // returns the cache when non-nil, so "the next load() will show
+            // the truth" was false — and the entries silently vanished on
+            // relaunch.
+            cached = entries
         } catch {
-            // Callers are UI actions; the next `load()` will show the truth.
-            // No silent failure: this is the one Core file without a logger,
-            // so surface via stderr for the log tail.
+            cached = nil // force the next load() to re-read what's really on disk
+            // Callers are UI actions; no silent failure: this is the one
+            // Core file without a logger, so surface via stderr.
             FileHandle.standardError.write(Data("hwhisper: dictionary save failed: \(error)\n".utf8))
         }
     }

@@ -96,6 +96,31 @@ public enum RefinementStyle: String, Sendable, CaseIterable {
     }
 }
 
+/// Transcript-transport policy for refinement endpoints, shared by the
+/// dictation pipeline and both connection-test UIs so the rule can't drift
+/// or be forgotten at one call site (2026-08 audit: the connection tests
+/// used to skip it, reporting "인증되었습니다" for an endpoint the real
+/// pipeline would then silently refuse).
+public enum RefinerEndpointPolicy {
+    /// `nil` when `url` is acceptable; otherwise a short user-facing reason.
+    /// Rules: https or localhost only (the transcript must never cross the
+    /// network in cleartext), and no query string — a `?key=…`-style
+    /// credential in the URL would be echoed into error logs by `URLError`'s
+    /// description (`NSErrorFailingURLStringKey`), so keys belong in the
+    /// Authorization header exclusively.
+    public static func rejectionReason(for url: URL) -> String? {
+        let host = url.host ?? ""
+        let isLocalHost = host == "localhost" || host == "127.0.0.1" || host == "::1"
+        if url.scheme != "https" && !isLocalHost {
+            return "https 또는 localhost 엔드포인트만 사용할 수 있습니다"
+        }
+        if let query = url.query, !query.isEmpty {
+            return "엔드포인트 URL에 쿼리 문자열(?key=… 등)을 넣을 수 없습니다 — API 키는 키 입력란에 입력하세요"
+        }
+        return nil
+    }
+}
+
 /// Connection settings for a single `OpenAICompatibleRefiner` instance.
 public struct OpenAICompatibleRefinerConfig: Sendable {
     public let endpoint: URL
@@ -105,13 +130,27 @@ public struct OpenAICompatibleRefinerConfig: Sendable {
     /// back to raw text on timeout/failure rather than blocking insertion.
     public let timeout: TimeInterval
     public let style: RefinementStyle
+    /// Optional sink for degradation diagnostics (e.g. "2/5 chunks fell back
+    /// to raw"). HwhisperCore has no logger of its own; the app wires this to
+    /// `HwhisperLog` so partial failures are diagnosable from the log instead
+    /// of masquerading as full successes (2026-08 audit — the silent
+    /// per-chunk raw fallback erased both signals 함정 23 established).
+    public let diagnosticLog: (@Sendable (String) -> Void)?
 
-    public init(endpoint: URL, model: String, apiKey: String? = nil, timeout: TimeInterval = 8, style: RefinementStyle = .polish) {
+    public init(
+        endpoint: URL,
+        model: String,
+        apiKey: String? = nil,
+        timeout: TimeInterval = 8,
+        style: RefinementStyle = .polish,
+        diagnosticLog: (@Sendable (String) -> Void)? = nil
+    ) {
         self.endpoint = endpoint
         self.model = model
         self.apiKey = apiKey
         self.timeout = timeout
         self.style = style
+        self.diagnosticLog = diagnosticLog
     }
 }
 
@@ -128,6 +167,13 @@ public final class OpenAICompatibleRefiner: TextRefiner {
         sessionConfig.timeoutIntervalForRequest = config.timeout
         sessionConfig.timeoutIntervalForResource = config.timeout
         self.session = URLSession(configuration: sessionConfig)
+    }
+
+    deinit {
+        // A `URLSession` is retained by the system until invalidated —
+        // without this, every discarded refiner leaked its session and
+        // connection pool for the process lifetime.
+        session.finishTasksAndInvalidate()
     }
 
     public func refine(_ text: String, context: RefinementContext) async throws -> String {
@@ -194,14 +240,31 @@ public final class OpenAICompatibleRefiner: TextRefiner {
             (data, response) = try await session.data(for: request)
         } catch let error as URLError where error.code == .timedOut {
             throw TextRefinerError.timedOut
+        } catch let error as URLError {
+            // NEVER interpolate the raw URLError: its NSError description
+            // embeds the failing URL twice (`NSErrorFailingURLStringKey`),
+            // and a custom endpoint carrying a `?key=…` credential would put
+            // that key verbatim into Hwhisper.log — which the README tells
+            // users to paste into bug reports. Code + host only.
+            throw TextRefinerError.requestFailed(
+                "URLError \(error.code.rawValue) contacting \(config.endpoint.host ?? "unknown-host")"
+            )
         } catch {
-            throw TextRefinerError.requestFailed("\(error)")
+            throw TextRefinerError.requestFailed("transport error (\(type(of: error)))")
         }
 
         guard let httpResponse = response as? HTTPURLResponse, (200..<300).contains(httpResponse.statusCode) else {
             let status = (response as? HTTPURLResponse)?.statusCode ?? -1
-            let bodyText = String(data: data, encoding: .utf8) ?? ""
-            throw TextRefinerError.requestFailed("HTTP \(status): \(bodyText.prefix(200))")
+            // The raw response body must not travel in the error: this string
+            // is logged, and several OpenAI-compatible proxies (FastAPI/
+            // pydantic-based: LiteLLM, vLLM, …) echo the submitted `messages`
+            // array — i.e. the transcript — into 4xx validation bodies, which
+            // would break the "transcript never reaches the log" guarantee.
+            // Only a strictly-decoded OpenAI-style error envelope's code and
+            // (bounded) message are surfaced; an echoing 422 body doesn't fit
+            // that shape and reduces to the bare status.
+            let detail = Self.providerErrorDetail(from: data)
+            throw TextRefinerError.requestFailed("HTTP \(status)\(detail.map { ": \($0)" } ?? "")")
         }
 
         let decoded: ChatCompletionResponse
@@ -236,7 +299,8 @@ public final class OpenAICompatibleRefiner: TextRefiner {
     /// to ITS OWN raw text, so one bad chunk never loses the rest.
     private func refineChunked(_ chunks: [String], context: RefinementContext) async throws -> String {
         var results = [String](repeating: "", count: chunks.count)
-        try await withThrowingTaskGroup(of: (Int, String).self) { group in
+        var failedChunks: [(index: Int, error: String)] = []
+        try await withThrowingTaskGroup(of: (Int, String, String?).self) { group in
             var next = 0
             func submit() -> Bool {
                 guard next < chunks.count else { return false }
@@ -244,11 +308,17 @@ public final class OpenAICompatibleRefiner: TextRefiner {
                 next += 1
                 group.addTask {
                     do {
-                        return (index, try await self.refineOnce(chunk, style: .polish, context: context))
+                        return (index, try await self.refineOnce(chunk, style: .polish, context: context), nil)
                     } catch {
                         // Per-chunk defense: keep this chunk's complete raw text
-                        // rather than dropping it or failing the whole join.
-                        return (index, chunk.trimmingCharacters(in: .whitespacesAndNewlines))
+                        // rather than dropping it or failing the whole join —
+                        // but report the failure via `diagnosticLog` below.
+                        // Silently succeeding used to erase both of 함정 23's
+                        // diagnosis signals (refined_text=null and the raw-
+                        // fallback log line), making half-refined output
+                        // undiagnosable.
+                        let described = (error as? TextRefinerError).map { "\($0)" } ?? "\(type(of: error))"
+                        return (index, chunk.trimmingCharacters(in: .whitespacesAndNewlines), described)
                     }
                 }
                 return true
@@ -256,12 +326,19 @@ public final class OpenAICompatibleRefiner: TextRefiner {
             var running = 0
             while running < Self.chunkConcurrency, submit() { running += 1 }
             while running > 0 {
-                if let (index, refined) = try await group.next() {
+                if let (index, refined, failure) = try await group.next() {
                     results[index] = refined
+                    if let failure { failedChunks.append((index, failure)) }
                     running -= 1
                     if submit() { running += 1 }
                 }
             }
+        }
+        if !failedChunks.isEmpty {
+            let detail = failedChunks.map { "#\($0.index + 1): \($0.error)" }.joined(separator: "; ")
+            config.diagnosticLog?(
+                "refinement degraded: \(failedChunks.count)/\(chunks.count) chunk(s) fell back to raw (\(detail))"
+            )
         }
         return results.joined(separator: " ")
     }
@@ -419,6 +496,44 @@ public final class OpenAICompatibleRefiner: TextRefiner {
         // identifier was removed from RefinementContext entirely — the
         // transcript is never adapted to whichever app is focused.
         return prompt
+    }
+}
+
+extension OpenAICompatibleRefiner {
+    /// Strictly-decoded OpenAI-style error envelope (`{"error": {"message":…,
+    /// "code":…}}`). Any body that doesn't fit — including the FastAPI 422
+    /// shape that echoes the submitted messages — yields `nil`, so nothing
+    /// unvetted can ride an error string into the log.
+    private struct ProviderErrorEnvelope: Decodable {
+        struct Detail: Decodable {
+            let message: String?
+            let code: FlexibleCode?
+        }
+        /// Providers disagree on the code's JSON type (Gemini: int, OpenAI:
+        /// string) — accept either.
+        enum FlexibleCode: Decodable {
+            case int(Int), string(String)
+            init(from decoder: Decoder) throws {
+                let container = try decoder.singleValueContainer()
+                if let i = try? container.decode(Int.self) { self = .int(i); return }
+                self = .string(try container.decode(String.self))
+            }
+            var text: String {
+                switch self {
+                case .int(let i): "\(i)"
+                case .string(let s): s
+                }
+            }
+        }
+        let error: Detail
+    }
+
+    static func providerErrorDetail(from data: Data) -> String? {
+        guard let envelope = try? JSONDecoder().decode(ProviderErrorEnvelope.self, from: data) else { return nil }
+        var parts: [String] = []
+        if let code = envelope.error.code { parts.append("code \(code.text)") }
+        if let message = envelope.error.message, !message.isEmpty { parts.append(String(message.prefix(120))) }
+        return parts.isEmpty ? nil : parts.joined(separator: " — ")
     }
 }
 

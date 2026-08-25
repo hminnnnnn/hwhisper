@@ -13,38 +13,10 @@ import Security
 enum KeychainHelper {
     private static let service = "com.hminn.hwhisper.apikey"
 
-    /// Writes `value` for `account`, replacing any existing item. Passing an
-    /// empty string deletes the stored key instead of storing an empty
-    /// secret.
-    static func save(_ value: String, account: String) {
-        delete(account: account)
-        guard !value.isEmpty else { return }
-        let query: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: service,
-            kSecAttrAccount as String: account,
-            kSecValueData as String: Data(value.utf8),
-            kSecAttrAccessible as String: kSecAttrAccessibleAfterFirstUnlock
-        ]
-        let status = SecItemAdd(query as CFDictionary, nil)
-        if status != errSecSuccess {
-            HwhisperLog.log("keychain save failed for account \(account): OSStatus \(status)")
-        }
-    }
-
-    static func read(account: String) -> String? {
-        let query: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: service,
-            kSecAttrAccount as String: account,
-            kSecReturnData as String: true,
-            kSecMatchLimit as String: kSecMatchLimitOne
-        ]
-        var result: AnyObject?
-        let status = SecItemCopyMatching(query as CFDictionary, &result)
-        guard status == errSecSuccess, let data = result as? Data else { return nil }
-        return String(data: data, encoding: .utf8)
-    }
+    // `save`/`read` (the live-path, prompt-capable operations) were deleted
+    // in the 2026-08 audit — nothing referenced them since the move to
+    // `CredentialStore`. Only the migration pair below survives; if keychain
+    // storage ever returns, it goes behind `CredentialStore`, not here.
 
     /// Migration-only read: `kSecUseAuthenticationUIFail` tells
     /// `SecItemCopyMatching` to fail immediately with

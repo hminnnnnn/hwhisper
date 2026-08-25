@@ -315,14 +315,12 @@ private struct HistoryRow: View {
         }
     }
 
-    /// Human-readable app name resolved from the stored bundle ID; falls
-    /// back to the bundle ID's last component for apps no longer installed.
+    /// Cached — see `AppNameResolver`. This runs in `body` for every visible
+    /// row, so the uncached LaunchServices lookup (0.7–10ms each) was the
+    /// history tab's scroll jank.
     private var appName: String? {
         guard let bundleID = item.targetBundleID else { return nil }
-        if let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleID) {
-            return FileManager.default.displayName(atPath: url.path)
-        }
-        return bundleID.components(separatedBy: ".").last
+        return AppNameResolver.name(for: bundleID)
     }
 
     @ViewBuilder

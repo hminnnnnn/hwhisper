@@ -33,15 +33,24 @@ enum HwhisperLog {
         return handle
     }()
 
-    /// A fresh formatter per call rather than a cached static — avoids a
-    /// shared-mutable-state Sendable violation under Swift 6 strict
-    /// concurrency (`ISO8601DateFormatter` is not `Sendable`), and log calls
-    /// are infrequent enough that the extra allocation is immaterial.
+    /// Cached format style. `Date.ISO8601FormatStyle` is a `Sendable` value
+    /// type, so this avoids the Swift 6 shared-mutable-state problem that a
+    /// cached `ISO8601DateFormatter` (not `Sendable`) would pose — without
+    /// paying that class's construction on every line. The old "fresh
+    /// formatter per call" comment claimed the allocation was immaterial;
+    /// measured, it was 0.7–4ms per call (150–1000× a cached formatter), and
+    /// `SingleKeyHotkeyMonitor` logs on the hotkey tap path *before* the
+    /// recording starts, so every tap paid it (2026-08 audit).
+    private static let timestampStyle = Date.ISO8601FormatStyle(includingFractionalSeconds: true)
+
     private static func timestamp(for date: Date) -> String {
-        let formatter = ISO8601DateFormatter()
-        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-        return formatter.string(from: date)
+        date.formatted(timestampStyle)
     }
+
+    /// File writes happen here, off the caller's thread — `log()` is called
+    /// from the hotkey handler and other latency-sensitive paths, which
+    /// shouldn't block on disk I/O. Serial, so line order is preserved.
+    private static let writeQueue = DispatchQueue(label: "hwhisper.log-write", qos: .utility)
 
     /// Best-effort version/build-time pair for the launch header. Uses the
     /// bundle's `CFBundleShortVersionString` when running from an .app
@@ -83,8 +92,24 @@ enum HwhisperLog {
     }
 
     private static func write(_ message: String) {
-        guard let fileHandle else { return }
-        let line = "[\(timestamp(for: Date()))] \(isTestRun ? "[test] " : "")\(message)\n"
-        fileHandle.write(Data(line.utf8))
+        // Timestamp and the test-run marker are captured at call time (so the
+        // line reflects when it was logged, not when the queue drained), but
+        // formatting and the file write happen on the serial queue.
+        let date = Date()
+        let testMarker = isTestRun ? "[test] " : ""
+        let work: @Sendable () -> Void = {
+            guard let fileHandle else { return }
+            let line = "[\(timestamp(for: date))] \(testMarker)\(message)\n"
+            fileHandle.write(Data(line.utf8))
+        }
+        if isTestRun {
+            // Test hooks `exit()` right after logging and some (e.g.
+            // `--test-home-period-cycle`) grep the file immediately — an
+            // async write could be lost to the exit. Tests aren't
+            // latency-sensitive, so write through.
+            writeQueue.sync(execute: work)
+        } else {
+            writeQueue.async(execute: work)
+        }
     }
 }

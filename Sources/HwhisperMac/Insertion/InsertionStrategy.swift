@@ -14,9 +14,15 @@ enum InsertionOutcome: Equatable {
 /// One of C1 (clipboard+⌘V), C2 (AX direct set), C3 (CGEvent keystrokes)
 /// from the per-app strategy registry (§3 Decision c).
 ///
-/// Implementations assume the caller has already performed the TOCTOU
-/// secure-input check (`SecureInputGuard`) and resolved the destination —
-/// strategies do not repeat those checks themselves.
+/// The coordinator (`TextInserter`) performs the first secure-input check
+/// and resolves the destination; every strategy MUST re-check
+/// `SecureInputGuard.isSecureInputActive()` immediately before its actual
+/// write (pasteboard set / AX set / keystroke post) — the coordinator's
+/// check is stale by then (AX resolution can block for tens of ms, or
+/// seconds against an unresponsive app), and the re-check is a cheap
+/// process-global read. This is the contract SecureInputGuard's doc comment
+/// states; an earlier revision of this comment claimed the opposite and no
+/// strategy re-checked (2026-08 audit).
 ///
 /// Takes the `InsertionDestination` resolved at insertion time, NOT the
 /// hotkey-down snapshot. That distinction is load-bearing for

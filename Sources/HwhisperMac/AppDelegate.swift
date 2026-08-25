@@ -153,11 +153,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var hasUsedWhisperKit = false
     private var captureSnapshot: TargetContextSnapshot?
     private var isCapturing = false
-    private var captureStartedAt: Date?
+    /// Monotonic — the cancel-tap window and the 300s auto-stop measure the
+    /// user's real elapsed time, so they must not be read from the wall
+    /// clock in a handler: `Date()` measures "user interval + app scheduling
+    /// lag" and steps under NTP correction after wake (함정 27 — the monitor
+    /// layer was fixed to `event.timestamp` in v0.2.16; these two sibling
+    /// measurements had kept the old bug class).
+    private var captureStartedAt: ContinuousClock.Instant?
     /// Ticks once a second while recording to drive the countdown warning and
     /// the hard auto-stop (see `startRecordingLimitTimer`). Invalidated by
     /// every path that ends a recording.
     private var recordingLimitTimer: Timer?
+    /// Polls `audioCapture.currentLevel()` at ~12Hz (the old tap-driven
+    /// cadence) to animate the indicator's waveform while recording. A timer
+    /// on the main actor replaces the old per-buffer callback, which created
+    /// a `Task { @MainActor }` on the realtime audio thread for every tap
+    /// buffer (함정 21's forbidden shape, plus an allocation on a realtime
+    /// thread). Invalidated by every path that ends a recording.
+    private var levelMeterTimer: Timer?
     /// Set once notifications are confirmed denied, so `postNotification`
     /// logs the "skipping" fact exactly once instead of on every call.
     private var hasLoggedNotificationsDenied = false
@@ -180,51 +193,42 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var wakeObservers: [NSObjectProtocol] = []
     /// Input Monitoring is requested at most once per launch — see `applyHotkeyMode`.
     private var hasRequestedInputMonitoring = false
-    /// Provider rawValue → API key, populated after the first successful
-    /// Keychain read so the (potentially prompt-blocking) read happens at
-    /// most once per provider per run. Cleared when the key is re-saved.
+    /// Provider rawValue → API key, so the file read happens at most once
+    /// per provider per run. Cleared when the key is re-saved.
     private var apiKeyCache: [String: String] = [:]
-    /// Providers whose Keychain read is still blocked (typically on a
-    /// macOS access-authorization prompt). While set, refinement falls back
-    /// to raw instead of stacking more blocked reads.
-    private var apiKeyReadsInFlight: Set<String> = []
     private var apiKeyObserver: NSObjectProtocol?
+    /// Reused across dictations so the TLS connection pool survives: a fresh
+    /// `URLSession` per dictation paid DNS + TCP + TLS (~100-300ms) at the
+    /// head of every refine, and the discarded sessions were never
+    /// invalidated (2026-08 audit). Rebuilt only when the config changes.
+    private var cachedRefiner: (key: String, refiner: OpenAICompatibleRefiner)?
 
-    /// Resolves the API key for `provider` without ever letting a blocked
-    /// `SecItemCopyMatching` (keychain authorization prompt) stall the
-    /// dictation pipeline: the read runs as an unstructured detached task
-    /// (task-group timeouts can't help — the group would await the blocked
-    /// child), we poll its cached result for up to 3s, and if it's still
-    /// pending the caller inserts raw text while the read self-heals into
-    /// the cache whenever the user answers the prompt.
+    /// Resolves the API key for `provider` — a read of `CredentialStore`'s
+    /// small owner-only JSON file, moved off the main actor. The elaborate
+    /// detached-task + 3s-poll machinery that used to live here guarded a
+    /// Keychain `SecItemCopyMatching` that could block on a TCC prompt
+    /// (함정 3); credentials moved to a plain file long since, and the
+    /// poll's sleep-before-first-check charged every launch's first
+    /// dictation a guaranteed ≥100ms for a hazard that no longer exists
+    /// (2026-08 audit). The one-time keychain *migration* path still uses
+    /// only the non-blocking `readWithoutPrompt`.
     private func fetchAPIKey(for provider: RefinerProvider) async -> String? {
         guard provider.requiresAPIKey else { return "" }
         if let cached = apiKeyCache[provider.rawValue] { return cached }
+        let key = await Task.detached(priority: .userInitiated) {
+            RefinementSettings.apiKey(for: provider)
+        }.value
+        guard let key, !key.isEmpty else { return nil }
+        apiKeyCache[provider.rawValue] = key
+        return key
+    }
 
-        if !apiKeyReadsInFlight.contains(provider.rawValue) {
-            apiKeyReadsInFlight.insert(provider.rawValue)
-            let readTask = Task.detached(priority: .userInitiated) {
-                RefinementSettings.apiKey(for: provider)
-            }
-            Task { [weak self] in
-                let key = await readTask.value
-                await MainActor.run {
-                    guard let self else { return }
-                    self.apiKeyReadsInFlight.remove(provider.rawValue)
-                    if let key, !key.isEmpty { self.apiKeyCache[provider.rawValue] = key }
-                }
-            }
-        }
-
-        for _ in 0..<30 {
-            try? await Task.sleep(nanoseconds: 100_000_000)
-            if let cached = apiKeyCache[provider.rawValue] { return cached }
-            if !apiKeyReadsInFlight.contains(provider.rawValue) {
-                // Read finished but produced no usable key (missing/empty).
-                return nil
-            }
-        }
-        return nil
+    private func sharedRefiner(for config: OpenAICompatibleRefinerConfig) -> OpenAICompatibleRefiner {
+        let key = "\(config.endpoint.absoluteString)|\(config.model)|\(config.apiKey ?? "")|\(config.timeout)|\(config.style.rawValue)"
+        if let cachedRefiner, cachedRefiner.key == key { return cachedRefiner.refiner }
+        let fresh = OpenAICompatibleRefiner(config: config)
+        cachedRefiner = (key, fresh)
+        return fresh
     }
 
     /// One-time startup migration off the Keychain (§ bugfix: repeated
@@ -298,12 +302,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             Task { @MainActor in self?.applyHotkeyMode() }
         }
         observeWakeToReArmHotkey()
-
-        audioCapture.onLevelUpdate = { [weak self] level in
-            Task { @MainActor in
-                self?.recordingIndicator.updateLevel(level)
-            }
-        }
 
         // Inline X on the indicator → cancel the in-progress recording
         // immediately (any time during listening, not just the double-tap
@@ -526,7 +524,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         HwhisperLog.log("job \(jobID) queued (test-pipeline)")
         pipelineActor.enqueue(PipelineJob(
             id: jobID,
-            run: { [weak self] in await self?.processQueuedJob(buffer: buffer, snapshot: snapshot) },
+            run: { [weak self] in await self?.processQueuedJob(buffer: buffer, snapshot: snapshot, enqueuedAt: .now) },
             onDropped: { [weak self] in self?.handleJobDropped(jobID: jobID) }
         ))
     }
@@ -703,15 +701,37 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         mainWindowController.show(section: "dictionary")
     }
 
+    /// Runs a processing-lane UI update (job progress/outcome on the pill or
+    /// menu icon) only while no recording is live. The indicator and status
+    /// icon are single-slot, but recording and job processing overlap by
+    /// design — before this guard, a background job finishing its
+    /// refine→success→auto-hide sequence would clobber and then HIDE the
+    /// live LISTENING pill (and revert the red menu icon), leaving an open
+    /// microphone with zero indication and no reachable cancel X (2026-08
+    /// audit). The recording lane always wins; a suppressed job outcome is
+    /// still fully logged and recorded to history.
+    private func showProcessingUI(_ update: () -> Void) {
+        guard !isCapturing else { return }
+        update()
+    }
+
     /// Sets the menu bar icon, optionally auto-reverting to the idle
     /// waveform after `interval` — used so success/failure states are
     /// visible but don't get stuck once the moment has passed.
     private func setStatusIcon(_ symbol: StatusIcon, autoRevertAfter interval: TimeInterval? = nil) {
+        // Recording-lane priority (see `showProcessingUI`): while capturing,
+        // only the recording state may draw the icon.
+        guard !isCapturing || symbol == Self.recordingIcon else { return }
         iconResetWorkItem?.cancel()
         statusItem?.button?.image = symbol.image
         guard let interval else { return }
         let workItem = DispatchWorkItem { [weak self] in
-            self?.statusItem?.button?.image = StatusIcon.idle.image
+            MainActor.assumeIsolated {
+                // A revert scheduled before a recording started must not
+                // overwrite the live red recording icon.
+                guard let self, !self.isCapturing else { return }
+                self.statusItem?.button?.image = StatusIcon.idle.image
+            }
         }
         iconResetWorkItem = workItem
         DispatchQueue.main.asyncAfter(deadline: .now() + interval, execute: workItem)
@@ -1057,7 +1077,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// enqueues the recorded buffer for processing.
     private func handleHotkeyToggle() {
         if isCapturing {
-            if let startedAt = captureStartedAt, Date().timeIntervalSince(startedAt) <= Self.cancelTapWindow {
+            if let startedAt = captureStartedAt,
+               startedAt.duration(to: .now) <= .seconds(Self.cancelTapWindow) {
                 cancelCapture()
             } else {
                 stopCaptureAndEnqueue()
@@ -1070,7 +1091,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func startCapture() {
         guard !isCapturing else { return }
         isCapturing = true
-        captureStartedAt = Date()
+        captureStartedAt = .now
         captureSnapshot = TargetContextSnapshot.capture()
 
         do {
@@ -1080,6 +1101,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             pipelineActor.transition(to: .listening)
             HwhisperLog.log("recording started")
             startRecordingLimitTimer()
+            startLevelMeterTimer()
         } catch {
             isCapturing = false
             captureStartedAt = nil
@@ -1111,12 +1133,32 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         recordingIndicator.updateCountdown(remaining: nil)
     }
 
+    private func startLevelMeterTimer() {
+        levelMeterTimer?.invalidate()
+        levelMeterTimer = Timer.scheduledTimer(withTimeInterval: 1.0 / 12.0, repeats: true) { [weak self] _ in
+            // Timer callbacks are delivered on the scheduling (main) thread —
+            // same `assumeIsolated` pattern as `recordingLimitTimer` (함정 21:
+            // no `Task { @MainActor }` from event/timer callbacks).
+            MainActor.assumeIsolated {
+                guard let self, self.isCapturing else { return }
+                self.recordingIndicator.updateLevel(self.audioCapture.currentLevel())
+            }
+        }
+    }
+
+    private func stopLevelMeterTimer() {
+        levelMeterTimer?.invalidate()
+        levelMeterTimer = nil
+    }
+
     private func recordingLimitTick() {
         guard isCapturing, let startedAt = captureStartedAt else {
             stopRecordingLimitTimer()
             return
         }
-        let elapsed = Date().timeIntervalSince(startedAt)
+        let elapsedDuration = startedAt.duration(to: .now)
+        let elapsed = Double(elapsedDuration.components.seconds)
+            + Double(elapsedDuration.components.attoseconds) / 1e18
         if elapsed >= Self.recordingMaxDuration {
             HwhisperLog.log("recording auto-stopped at max duration (\(Int(Self.recordingMaxDuration))s)")
             stopCaptureAndEnqueue() // invalidates the timer via stopRecordingLimitTimer
@@ -1134,6 +1176,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func cancelCapture() {
         guard isCapturing else { return }
         stopRecordingLimitTimer()
+        stopLevelMeterTimer()
         isCapturing = false
         captureStartedAt = nil
         captureSnapshot = nil
@@ -1153,6 +1196,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func stopCaptureAndEnqueue() {
         guard isCapturing else { return }
         stopRecordingLimitTimer()
+        stopLevelMeterTimer()
         isCapturing = false
         captureStartedAt = nil
 
@@ -1172,11 +1216,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // WhisperKit fallback below) — no OS gate here anymore, so older Macs
         // queue and transcribe instead of being rejected outright.
         let jobID = UUID()
+        let enqueuedAt = ContinuousClock.now
         HwhisperLog.log("job \(jobID) queued")
         let job = PipelineJob(
             id: jobID,
             run: { [weak self] in
-                await self?.processQueuedJob(buffer: buffer, snapshot: snapshot)
+                await self?.processQueuedJob(buffer: buffer, snapshot: snapshot, enqueuedAt: enqueuedAt)
             },
             onDropped: { [weak self] in
                 self?.handleJobDropped(jobID: jobID)
@@ -1189,9 +1234,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// job runs at a time (`PipelineActor`'s single-flight queue), so this
     /// method never overlaps with another call to itself — safe to freely
     /// mutate the shared icon/indicator/log state.
-    private func processQueuedJob(buffer: PCMBuffer, snapshot: TargetContextSnapshot) async {
+    private func processQueuedJob(buffer: PCMBuffer, snapshot: TargetContextSnapshot, enqueuedAt: ContinuousClock.Instant) async {
         pipelineActor.transition(to: .transcribing)
-        recordingIndicator.showTranscribing()
+        showProcessingUI { recordingIndicator.showTranscribing() }
 
         let trimResult = EnergyVAD().trim(buffer)
         if trimResult.leadingTrimmedSeconds > 0 || trimResult.trailingTrimmedSeconds > 0 {
@@ -1199,7 +1244,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         if trimResult.isEntirelySilent {
             HwhisperLog.log("VAD: entire recording is silence; skipping STT")
-            showNoSpeechWarning()
+            showProcessingUI { showNoSpeechWarning() }
             pipelineActor.transition(to: .idle)
             return
         }
@@ -1225,7 +1270,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 // minutes); surface that instead of looking hung.
                 if !hasUsedWhisperKit {
                     HwhisperLog.log("WhisperKit: first use on this run — loading model (downloads ~600MB on first ever run)")
-                    recordingIndicator.showPreparingModel("음성 모델 준비 중… 최초 1회 다운로드(수 분 걸릴 수 있음)")
+                    showProcessingUI { recordingIndicator.showPreparingModel("음성 모델 준비 중… 최초 1회 다운로드(수 분 걸릴 수 있음)") }
                 }
                 result = try await whisperKitRecognizer.transcribe(
                     [trimResult.buffer],
@@ -1249,7 +1294,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             let hasWords = trimmedText.contains { $0.isLetter || $0.isNumber }
             guard hasWords else {
                 HwhisperLog.log("no-speech guard: transcript had no words (\(result.text.count) chars); skipping insertion")
-                showNoSpeechWarning()
+                showProcessingUI { showNoSpeechWarning() }
                 pipelineActor.transition(to: .idle)
                 return
             }
@@ -1259,13 +1304,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             let speechSeconds = trimResult.buffer.sampleRate > 0
                 ? Double(trimResult.buffer.samples.count) / trimResult.buffer.sampleRate
                 : 0
-            await runRefinementPipeline(rawText: result.text, snapshot: snapshot, speechSeconds: speechSeconds)
+            await runRefinementPipeline(rawText: result.text, snapshot: snapshot, speechSeconds: speechSeconds, enqueuedAt: enqueuedAt)
         } catch {
             HwhisperLog.log("transcription failed: \(error)")
             let reason = describeTranscriptionError(error)
             setLastError(reason)
             setStatusIcon(Self.failureIcon, autoRevertAfter: 2.5)
-            recordingIndicator.showFailure(reason)
+            showProcessingUI { recordingIndicator.showFailure(reason) }
             postNotification(title: "hwhisper: 받아쓰기 실패", body: reason)
             pipelineActor.transition(to: .idle)
         }
@@ -1282,6 +1327,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         HwhisperLog.log("job \(jobID) dropped: pipeline backpressure exceeded depth \(PipelineActor.maxQueueDepth)")
         setLastError(reason)
         setStatusIcon(Self.failureIcon, autoRevertAfter: 2.5)
+        // Mirror on the pill too: if notifications are denied,
+        // `postNotification` goes silent and a dropped recording would
+        // otherwise be invisible (함정 7 — every other failure path already
+        // shows the indicator).
+        showProcessingUI { recordingIndicator.showFailure(reason) }
         postNotification(title: "hwhisper: 녹음이 삭제되었습니다", body: reason)
     }
 
@@ -1289,9 +1339,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// back to the raw transcript on any failure/timeout/misconfiguration —
     /// refinement must never be a dead end (AC2). Logs elapsed time,
     /// provider, and outcome to `HwhisperLog` either way.
-    private func runRefinementPipeline(rawText: String, snapshot: TargetContextSnapshot, speechSeconds: Double = 0) async {
+    private func runRefinementPipeline(rawText: String, snapshot: TargetContextSnapshot, speechSeconds: Double = 0, enqueuedAt: ContinuousClock.Instant) async {
         guard RefinementSettings.isEnabled else {
-            await insertAndReport(text: rawText, snapshot: snapshot, speechSeconds: speechSeconds)
+            await insertAndReport(text: rawText, snapshot: snapshot, speechSeconds: speechSeconds, enqueuedAt: enqueuedAt)
             return
         }
         pipelineActor.transition(to: .refining)
@@ -1300,25 +1350,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let endpointString = RefinementSettings.endpoint(for: provider)
         guard let endpointURL = URL(string: endpointString), !endpointString.isEmpty else {
             HwhisperLog.log("refinement skipped: no valid endpoint configured for provider \(provider.rawValue)")
-            await insertAndReport(text: rawText, snapshot: snapshot, speechSeconds: speechSeconds)
+            await insertAndReport(text: rawText, snapshot: snapshot, speechSeconds: speechSeconds, enqueuedAt: enqueuedAt)
             return
         }
 
-        // Defense-in-depth (security review #4): refuse to send the
-        // transcript over cleartext to a non-local host. App Transport
-        // Security already blocks http:// by default, but this makes the
-        // policy explicit and fails safe to raw insertion rather than
-        // relying solely on ATS. http://localhost / 127.0.0.1 (Ollama) is
-        // allowed; everything else must be https.
-        let host = endpointURL.host ?? ""
-        let isLocalHost = host == "localhost" || host == "127.0.0.1" || host == "::1"
-        if endpointURL.scheme != "https" && !isLocalHost {
-            HwhisperLog.log("refinement skipped: endpoint for provider \(provider.rawValue) is not https and not localhost — inserting raw text (set an https:// endpoint to enable refinement)")
-            await insertAndReport(text: rawText, snapshot: snapshot, speechSeconds: speechSeconds)
+        // Defense-in-depth (security review #4): the shared policy refuses
+        // cleartext to non-local hosts (ATS blocks http:// too, but the
+        // explicit check fails safe to raw insertion) and refuses query-
+        // string credentials (which would leak into error logs). Same rule
+        // the connection tests apply, so "인증되었습니다" and the real
+        // pipeline can't disagree.
+        if let rejection = RefinerEndpointPolicy.rejectionReason(for: endpointURL) {
+            HwhisperLog.log("refinement skipped: endpoint for provider \(provider.rawValue) rejected (\(rejection)) — inserting raw text")
+            await insertAndReport(text: rawText, snapshot: snapshot, speechSeconds: speechSeconds, enqueuedAt: enqueuedAt)
             return
         }
 
-        recordingIndicator.showRefining()
+        showProcessingUI { recordingIndicator.showRefining() }
         let timeout = RefinementSettings.timeout
         let model = RefinementSettings.model
         let style = RefinementSettings.refinementStyle
@@ -1334,17 +1382,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             protectedTerms: await personalDictionary.protectedTerms(presentIn: rawText)
         )
 
-        // The Keychain read must stay OUT of any structured-concurrency
-        // timeout race: `SecItemCopyMatching` blocks its thread while macOS
-        // shows an access-authorization prompt (observed live after a
-        // re-sign — first the main thread froze, then a task-group timeout
-        // hung anyway because the group must await its blocked child before
-        // returning). So: fetch once via an unstructured detached task with
-        // a deadline; while that read is still pending, later dictations
-        // fall back to raw immediately instead of piling up blocked reads.
         guard let apiKey = await fetchAPIKey(for: provider) else {
-            HwhisperLog.log("refinement skipped: API key unavailable (keychain read pending or empty) — inserting raw text")
-            await insertAndReport(text: rawText, snapshot: snapshot, speechSeconds: speechSeconds)
+            HwhisperLog.log("refinement skipped: API key unavailable (missing or empty) — inserting raw text")
+            await insertAndReport(text: rawText, snapshot: snapshot, speechSeconds: speechSeconds, enqueuedAt: enqueuedAt)
             return
         }
 
@@ -1354,9 +1394,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             model: model,
             apiKey: apiKey.isEmpty ? nil : apiKey,
             timeout: timeout,
-            style: style
+            style: style,
+            // Core has no logger; wire chunk-level degradation (e.g. "2/5
+            // chunks fell back to raw") into the app log so partial failures
+            // stay diagnosable (they used to vanish behind "refinement
+            // succeeded" — 2026-08 audit).
+            diagnosticLog: { HwhisperLog.log($0) }
         )
-        let refiner = OpenAICompatibleRefiner(config: config)
+        let refiner = sharedRefiner(for: config)
         // Long input is refined as ceil(chunks / concurrency) rounds of parallel
         // calls (see OpenAICompatibleRefiner.refineChunked); give the per-attempt
         // bound that many timeouts so a legitimately long refine isn't killed.
@@ -1370,17 +1415,30 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // frames it as a lot of input taking time. Cancelled when refine resolves.
         let slowNotice = Task { @MainActor [weak self] in
             try? await Task.sleep(nanoseconds: 6_000_000_000)
-            self?.recordingIndicator.showRefiningSlow("입력이 많아 시간이 소요되고 있어요")
+            guard let self, !self.isCapturing else { return }
+            self.recordingIndicator.showRefiningSlow("입력이 많아 시간이 소요되고 있어요")
         }
 
         // Auto-retry up to 3 times on any failure/timeout before falling back to
         // raw, so the user only has to register a key — transient errors, rate
-        // limits, and slow calls recover on their own (user request).
+        // limits, and slow calls recover on their own (user request). The whole
+        // loop shares one wall-clock budget: three sequential full-timeout
+        // attempts used to stall the pipeline for up to 135s while the user's
+        // caret wandered off (2026-08 audit) — fast-failing errors still get
+        // all three retries, but timeouts can't stack past the budget.
         let maxAttempts = 3
+        let overallBudget: TimeInterval = 45
+        let retryClock = ContinuousClock.now
         var refined: String?
         for attempt in 1...maxAttempts {
+            let spent = Double(retryClock.duration(to: .now).components.seconds)
+            let remaining = overallBudget - spent
+            if attempt > 1 && remaining < 2 {
+                HwhisperLog.log("refinement retry budget exhausted (\(Int(overallBudget))s) — falling back to raw text")
+                break
+            }
             do {
-                refined = try await withTimeout(effectiveTimeout) {
+                refined = try await withTimeout(min(effectiveTimeout, max(2, remaining))) {
                     try await refiner.refine(rawText, context: context)
                 }
                 break
@@ -1388,7 +1446,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 let elapsed = Date().timeIntervalSince(start)
                 if attempt < maxAttempts {
                     HwhisperLog.log("refinement attempt \(attempt)/\(maxAttempts) failed (elapsed=\(String(format: "%.2f", elapsed))s): \(error) — retrying")
-                    recordingIndicator.showRefiningSlow("정제 재시도 중… (\(attempt + 1)/\(maxAttempts))")
+                    showProcessingUI { recordingIndicator.showRefiningSlow("정제 재시도 중… (\(attempt + 1)/\(maxAttempts))") }
                 } else {
                     HwhisperLog.log("refinement failed after \(maxAttempts) attempts, falling back to raw text (provider=\(provider.rawValue), model=\(model), elapsed=\(String(format: "%.2f", elapsed))s): \(error)")
                 }
@@ -1399,9 +1457,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if let refined {
             let elapsed = Date().timeIntervalSince(start)
             HwhisperLog.log("refinement succeeded (provider=\(provider.rawValue), model=\(model), elapsed=\(String(format: "%.2f", elapsed))s)")
-            await insertAndReport(text: refined, snapshot: snapshot, rawText: rawText, speechSeconds: speechSeconds)
+            await insertAndReport(text: refined, snapshot: snapshot, rawText: rawText, speechSeconds: speechSeconds, enqueuedAt: enqueuedAt)
         } else {
-            await insertAndReport(text: rawText, snapshot: snapshot, speechSeconds: speechSeconds)
+            await insertAndReport(text: rawText, snapshot: snapshot, speechSeconds: speechSeconds, enqueuedAt: enqueuedAt)
         }
     }
 
@@ -1409,7 +1467,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// menu bar icon, "최근 오류" menu item, and floating indicator. Shared
     /// by both the raw and refined paths so refinement never changes how
     /// insertion outcomes are reported.
-    private func insertAndReport(text: String, snapshot: TargetContextSnapshot, rawText: String? = nil, speechSeconds: Double = 0) async {
+    private func insertAndReport(text: String, snapshot: TargetContextSnapshot, rawText: String? = nil, speechSeconds: Double = 0, enqueuedAt: ContinuousClock.Instant) async {
         // N-3 last-mile pass: runs after refinement (and on the raw path)
         // so dictionary spellings survive no matter what STT/LLM produced.
         let substituted = await personalDictionary.applyLastMileSubstitution(to: text)
@@ -1417,8 +1475,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             HwhisperLog.log("dictionary: last-mile substitution applied")
         }
         pipelineActor.transition(to: .inserting)
-        let outcome = await textInserter.insert(substituted, originalSnapshot: snapshot)
-        HwhisperLog.log("insertion outcome: \(outcome)")
+        // Follow-the-caret (함정 25) is right for the normal seconds-scale
+        // job, but a job that sat through slow refines/retries can complete
+        // minutes after the user moved on — typing into whatever app they're
+        // in *now* would be an unexpected paste. Stale jobs may still insert
+        // into the app dictation started in; a different app gets
+        // clipboard-only (2026-08 audit).
+        let isFresh = enqueuedAt.duration(to: .now) <= .seconds(30)
+        let outcome = await textInserter.insert(substituted, originalSnapshot: snapshot, allowCrossAppInsertion: isFresh)
+        HwhisperLog.log("insertion outcome: \(outcome)\(isFresh ? "" : " (stale job: cross-app insertion disabled)")")
         recordHistory(insertedText: substituted, rawText: rawText ?? text, snapshot: snapshot, outcome: outcome, durationSeconds: speechSeconds)
         // §3.1's "restoring" stage (clipboard restore, best-effort
         // verification) is carried out inside `TextInserter`/
@@ -1436,21 +1501,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             // the user noticing. Same app ⇒ the plain "완료" pill as before.
             if bundleIdentifier != snapshot.bundleIdentifier,
                let name = movedTargetDisplayName(for: bundleIdentifier) {
-                recordingIndicator.showCopiedToClipboard("\(name)에 입력했습니다 — 클립보드에도 복사됨")
+                showProcessingUI { recordingIndicator.showCopiedToClipboard("\(name)에 입력했습니다 — 클립보드에도 복사됨") }
             } else {
-                recordingIndicator.showSuccess()
+                showProcessingUI { recordingIndicator.showSuccess() }
             }
         case .copiedToClipboard(let reason):
             // Nothing focused could accept text. The transcript is on the
             // clipboard; say so rather than reporting a bare failure.
             setLastError(nil)
             setStatusIcon(Self.successIcon, autoRevertAfter: 1.5)
-            recordingIndicator.showCopiedToClipboard(reason)
+            showProcessingUI { recordingIndicator.showCopiedToClipboard(reason) }
         case .abortedSecureField:
             let reason = "보안 입력 필드로 판단되어 삽입을 건너뛰었습니다."
             setLastError(reason)
             setStatusIcon(Self.failureIcon, autoRevertAfter: 2.5)
-            recordingIndicator.showFailure(reason)
+            showProcessingUI { recordingIndicator.showFailure(reason) }
         case .failed:
             // `TextInserter` already posted its own precisely-worded
             // notification (clipboard-preserved reason, etc.) via its
@@ -1459,7 +1524,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             let reason = describeInsertionFailure()
             setLastError(reason)
             setStatusIcon(Self.failureIcon, autoRevertAfter: 2.5)
-            recordingIndicator.showFailure(reason)
+            showProcessingUI { recordingIndicator.showFailure(reason) }
         }
         pipelineActor.transition(to: .idle)
     }
@@ -1486,6 +1551,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         durationSeconds: Double = 0
     ) {
         guard HistorySettings.isEnabled, !rawText.isEmpty else { return }
+        // A dictation refused as a secure field is, by the very reason it was
+        // refused, the one transcript that must not be persisted: the user
+        // was most likely speaking a credential. Refusing the clipboard but
+        // keeping the text in a plaintext DB (and rendering it in the
+        // history tab) forever would be strictly worse (2026-08 audit).
+        if case .abortedSecureField = outcome {
+            HwhisperLog.log("history: skipping secure-field dictation (not persisted)")
+            return
+        }
         let outcomeLabel: String
         // Record where the text actually landed, not where dictation started —
         // the caret may have moved to another app, and the home tab's app-usage
@@ -1496,7 +1570,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             outcomeLabel = "inserted"
             targetBundleID = bundleIdentifier ?? snapshot.bundleIdentifier
         case .copiedToClipboard: outcomeLabel = "clipboard"
-        case .abortedSecureField: outcomeLabel = "secureField"
+        case .abortedSecureField: outcomeLabel = "secureField" // unreachable (guarded above); keeps the switch exhaustive
         case .failed: outcomeLabel = "failed"
         }
         let item = HistoryItem(

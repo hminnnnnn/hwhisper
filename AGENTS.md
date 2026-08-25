@@ -18,6 +18,7 @@
 | `scripts/make-app.sh` / `make-dmg.sh` | 유니버설 앱 번들 + 서명 / DMG |
 | `scripts/shoot.sh OUT.png [훅…]` | 창 단독 캡처(포커스·오디오 없이). **인라인 bash로 재작성 금지** |
 | `scripts/e2e-pipeline-test.sh <wav> <label>` | 파이프라인 E2E 러너 |
+| `scripts/refine-hygiene-test.sh` | 정제기 로그 위생·오류 경로 8시나리오(실 Gemini+로컬 스텁 — 키 유출·전사 에코·청크 열화 로그). **정제기 오류 처리/로그 수정 시 필수 재실행** |
 
 ## 테스트 훅 (앱 실행 인자)
 

@@ -7,7 +7,10 @@ import UserNotifications
 /// system notification best-effort.
 protocol InsertionNotifier {
     func notifyInsertionFailed(reason: String, transcriptPreservedToClipboard: Bool)
-    func notifyClipboardRestoreFailed()
+    /// The normal "nothing focused could take text" fallback — an outcome the
+    /// app reports as a success (transcript on the clipboard, ⌘V away), so it
+    /// must not be worded as a failure.
+    func notifyCopiedToClipboard(reason: String)
 }
 
 /// `UNUserNotificationCenter`-backed notifier. Delivery requires the host
@@ -23,8 +26,8 @@ struct SystemInsertionNotifier: InsertionNotifier {
         post(title: "hwhisper: insertion failed", body: body)
     }
 
-    func notifyClipboardRestoreFailed() {
-        post(title: "hwhisper: clipboard not restored", body: "Your previous clipboard contents could not be restored.")
+    func notifyCopiedToClipboard(reason: String) {
+        post(title: "hwhisper: 클립보드에 복사됨", body: reason)
     }
 
     private func post(title: String, body: String) {

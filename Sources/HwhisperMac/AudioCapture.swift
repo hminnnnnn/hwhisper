@@ -7,37 +7,40 @@ enum AudioCaptureError: Error {
 }
 
 /// Owns the audio session and `AVAudioEngine` mic tap (§3: HwhisperMac-only,
-/// Core never manages the audio session). Publishes two things per
-/// recording:
-///   - `PCMBuffer`s resampled to 16kHz mono Float, for engines that want a
-///     fixed format `AudioSource` (matches `HwhisperCore.AudioSource`).
-///   - the original-format `AVAudioPCMBuffer`s, unconverted, because
-///     `AppleSpeechRecognizer` negotiates its own preferred format via
-///     `SpeechAnalyzer.bestAvailableAudioFormat` and must not be fed a
-///     buffer this class already resampled to some other rate (see that
-///     type's header comment).
+/// Core never manages the audio session). Accumulates the recording as a
+/// single 16kHz mono Float sample buffer, returned by `stop()` as a
+/// `HwhisperCore.PCMBuffer`. Every downstream engine consumes this converted
+/// path — `AppleSpeechRecognizer` re-derives its own negotiated analyzer
+/// format from it in `makePCMBuffer`, so no raw-format copy of the audio is
+/// kept. (An earlier revision also retained every unconverted tap buffer
+/// "for engines that negotiate their own format"; nothing ever read them,
+/// and at the 300s cap that dead path held ~58MB on the realtime audio
+/// thread. 2026-08 audit.)
 final class AudioCapture {
     private let engine = AVAudioEngine()
     private var converter: AVAudioConverter?
     private var targetFormat: AVAudioFormat?
     private var isTapInstalled = false
 
-    /// Raw (unconverted) buffers captured from the input node's native
-    /// format, forwarded as-is for engines that negotiate their own format.
-    private(set) var rawBuffers: [AVAudioPCMBuffer] = []
-    private(set) var rawFormat: AVAudioFormat?
-
-    /// 16kHz mono Float buffers, resampled from the input node's native
-    /// format — the fixed-format path (`HwhisperCore.PCMBuffer`).
-    private(set) var convertedBuffers: [PCMBuffer] = []
-
-    /// Fires on every captured tap buffer with an approximate RMS level in
-    /// [0, 1] — feeds the floating recording indicator's live level meter
-    /// (§4 M1 UX fix: "am I actually being heard" feedback). Invoked on
-    /// whichever thread `AVAudioEngine`'s tap callback runs on (not
-    /// necessarily main); callers must hop to the main actor before
-    /// touching UI with it.
-    var onLevelUpdate: ((Float) -> Void)?
+    /// Guards `samples16k`/`latestLevel`: the tap callback appends from
+    /// whatever realtime thread `AVAudioEngine` uses, while `start()`/
+    /// `stop()`/`currentLevel()` touch the same state from the main actor.
+    /// `engine.stop()` + `removeTap` do NOT document that in-flight tap
+    /// callbacks have drained before returning, so an unsynchronized
+    /// `Array.append` racing the drain would be heap corruption, not just a
+    /// lost sample. Held only for the append/drain itself, never across
+    /// conversion work.
+    private let stateLock = NSLock()
+    /// 16kHz mono Float samples, appended per tap buffer after conversion.
+    private var samples16k: [Float] = []
+    /// Most recent coarse RMS level in [0, 1] — polled by the main actor's
+    /// level-meter timer (see `AppDelegate`). Written on the tap thread.
+    /// Replaces the old per-buffer `onLevelUpdate` callback, which spawned a
+    /// `Task { @MainActor }` from the realtime audio thread for every buffer
+    /// (~12/s) — the same "create a Task from an event callback" shape as
+    /// 함정 21, plus an allocation on a thread where allocation is a
+    /// priority-inversion hazard.
+    private var latestLevel: Float = 0
 
     static func requestMicrophonePermission() async -> Bool {
         switch AVAudioApplication.shared.recordPermission {
@@ -52,19 +55,23 @@ final class AudioCapture {
         }
     }
 
-    /// Starts capturing. Buffers accumulate in `rawBuffers`/`convertedBuffers`
-    /// until `stop()` is called (push-to-talk hold semantics, §4 M0/M1).
+    /// Starts capturing. Samples accumulate in `samples16k` until `stop()`
+    /// is called (push-to-talk hold semantics, §4 M0/M1).
     func start() throws {
         guard AVAudioApplication.shared.recordPermission == .granted else {
             throw AudioCaptureError.permissionDenied
         }
 
-        rawBuffers.removeAll()
-        convertedBuffers.removeAll()
+        stateLock.lock()
+        samples16k.removeAll(keepingCapacity: false)
+        // Pre-size for a typical dictation so the first several appends
+        // don't each realloc; long recordings still grow amortized-O(1).
+        samples16k.reserveCapacity(16_000 * 30)
+        latestLevel = 0
+        stateLock.unlock()
 
         let input = engine.inputNode
         let inputFormat = input.outputFormat(forBus: 0)
-        rawFormat = inputFormat
 
         guard let targetFormat = AVAudioFormat(
             commonFormat: .pcmFormatFloat32,
@@ -93,8 +100,10 @@ final class AudioCapture {
         }
     }
 
-    /// Stops capturing and returns the accumulated 16kHz mono buffers as a
-    /// single `HwhisperCore.PCMBuffer` (samples concatenated).
+    /// Stops capturing and returns the accumulated 16kHz mono samples as a
+    /// single `HwhisperCore.PCMBuffer`. Also RELEASES the accumulator:
+    /// before this, the last dictation's full PCM (~19MB at the 300s cap)
+    /// stayed resident until the next recording started (2026-08 audit).
     @discardableResult
     func stop() -> PCMBuffer {
         engine.stop()
@@ -102,14 +111,27 @@ final class AudioCapture {
             engine.inputNode.removeTap(onBus: 0)
             isTapInstalled = false
         }
+        converter = nil
+        targetFormat = nil
 
-        let samples = convertedBuffers.flatMap(\.samples)
+        stateLock.lock()
+        let samples = samples16k
+        samples16k = []
+        latestLevel = 0
+        stateLock.unlock()
         return PCMBuffer(samples: samples, sampleRate: 16_000, channelCount: 1)
     }
 
+    /// Latest RMS level in [0, 1] — safe to call from the main actor while
+    /// the tap thread is producing.
+    func currentLevel() -> Float {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        return latestLevel
+    }
+
     private func handle(buffer: AVAudioPCMBuffer) {
-        rawBuffers.append(buffer)
-        reportLevel(for: buffer)
+        let level = Self.computeLevel(for: buffer)
 
         guard let converter, let targetFormat else { return }
         let ratio = targetFormat.sampleRate / buffer.format.sampleRate
@@ -129,20 +151,20 @@ final class AudioCapture {
         guard error == nil, outBuffer.frameLength > 0, let channelData = outBuffer.floatChannelData else { return }
 
         let frameCount = Int(outBuffer.frameLength)
-        let samples = Array(UnsafeBufferPointer(start: channelData[0], count: frameCount))
-        convertedBuffers.append(PCMBuffer(samples: samples, sampleRate: targetFormat.sampleRate, channelCount: 1))
+        stateLock.lock()
+        samples16k.append(contentsOf: UnsafeBufferPointer(start: channelData[0], count: frameCount))
+        if let level { latestLevel = level }
+        stateLock.unlock()
     }
 
-    /// Computes a coarse RMS level from the raw (unconverted) tap buffer and
-    /// reports it via `onLevelUpdate`. Uses the raw buffer rather than the
-    /// resampled one so the meter still animates even if conversion ever
-    /// fails, and to avoid doing this work twice.
-    private func reportLevel(for buffer: AVAudioPCMBuffer) {
-        guard let onLevelUpdate,
-              buffer.format.commonFormat == .pcmFormatFloat32,
-              let channelData = buffer.floatChannelData else { return }
+    /// Coarse RMS level from the raw (unconverted) tap buffer — uses the raw
+    /// buffer rather than the resampled one so the meter still animates even
+    /// if conversion ever fails, and to avoid doing this work twice.
+    private static func computeLevel(for buffer: AVAudioPCMBuffer) -> Float? {
+        guard buffer.format.commonFormat == .pcmFormatFloat32,
+              let channelData = buffer.floatChannelData else { return nil }
         let frameCount = Int(buffer.frameLength)
-        guard frameCount > 0 else { return }
+        guard frameCount > 0 else { return nil }
 
         let samples = channelData[0]
         var sumSquares: Float = 0
@@ -154,8 +176,7 @@ final class AudioCapture {
         // Normal speech RMS sits quite low (~0.01-0.1); apply a fixed gain
         // so the meter uses more of its visual range for typical mic input
         // instead of sitting near zero.
-        let level = min(1, rms * 12)
-        onLevelUpdate(level)
+        return min(1, rms * 12)
     }
 }
 

@@ -29,13 +29,18 @@ struct TextInserter {
 
     init(notifier: InsertionNotifier = SystemInsertionNotifier()) {
         self.notifier = notifier
-        self.registry = InsertionStrategyRegistry(notifier: notifier)
+        self.registry = InsertionStrategyRegistry()
     }
 
     /// - Parameter originalSnapshot: captured at hotkey-down
     ///   (idle→listening, §3.1) via `TargetContextSnapshot.capture()`.
+    /// - Parameter allowCrossAppInsertion: `false` for stale jobs (queued
+    ///   long ago behind slow refines/retries) — following the caret into a
+    ///   *different* app minutes later reads as an unexpected paste, so a
+    ///   stale job only inserts into the app dictation started in and goes
+    ///   clipboard-only anywhere else. Fresh jobs keep the 함정 25 behavior.
     @MainActor
-    func insert(_ text: String, originalSnapshot: TargetContextSnapshot) async -> InsertionResult {
+    func insert(_ text: String, originalSnapshot: TargetContextSnapshot, allowCrossAppInsertion: Bool = true) async -> InsertionResult {
         // Checked FIRST, before anything touches the pasteboard: if focus moved
         // into a password prompt, writing the transcript to the shared
         // clipboard would itself be the leak we're trying to avoid. (The old
@@ -63,6 +68,10 @@ struct TextInserter {
         if destination.acceptsText == false {
             let where_ = destination.applicationName.map { "\($0)에는" } ?? "여기에는"
             return copyOnly(text, reason: "\(where_) 입력할 수 없어 클립보드에 복사했습니다 — ⌘V로 붙여넣기")
+        }
+
+        if !allowCrossAppInsertion && !destination.isSameApplication(as: originalSnapshot) {
+            return copyOnly(text, reason: "처리가 오래 걸리는 사이 다른 앱으로 이동해 클립보드에 복사했습니다 — ⌘V로 붙여넣기")
         }
 
         for strategy in registry.strategies(forBundleIdentifier: destination.bundleIdentifier) {
@@ -96,7 +105,12 @@ struct TextInserter {
 
     private func copyOnly(_ text: String, reason: String) -> InsertionResult {
         preserveToClipboard(text)
-        notifier.notifyInsertionFailed(reason: reason, transcriptPreservedToClipboard: true)
+        // This is the app's *normal* clipboard fallback, treated as a success
+        // by the caller (green check, friendly pill) — it used to post an
+        // "insertion failed" notification at the same time, contradicting
+        // itself (2026-08 audit). Failure notifications are reserved for the
+        // genuine `.failed` paths.
+        notifier.notifyCopiedToClipboard(reason: reason)
         return .copiedToClipboard(reason: reason)
     }
 

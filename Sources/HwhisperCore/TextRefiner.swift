@@ -22,8 +22,9 @@ public enum TextRefinerError: Error, Sendable {
 }
 
 /// Refinement engine abstraction (Decision d). Concrete engines:
-/// `PassthroughRefiner` (guaranteed floor), `LocalLLMRefiner` (qwen2.5:3b via
-/// Ollama, MemoryGate-gated), `CloudRefiner` (BYOK free-tier, primary).
+/// `PassthroughRefiner` (guaranteed floor) and `OpenAICompatibleRefiner`
+/// (one client for Gemini/Groq/Ollama/custom — the planned separate
+/// `LocalLLMRefiner`/`CloudRefiner` split never became necessary).
 public protocol TextRefiner: Sendable {
     func refine(_ text: String, context: RefinementContext) async throws -> String
 }

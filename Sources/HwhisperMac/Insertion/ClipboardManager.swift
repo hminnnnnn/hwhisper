@@ -1,68 +1,19 @@
 import AppKit
 
-enum RestoreResult: Equatable {
-    case restored
-    case failed
-}
-
-struct ClipboardSnapshot {
-    fileprivate let items: [ClipboardManager.SavedItem]
-}
-
-/// Best-effort clipboard save/restore (§3 Decision c, AC6: "clipboard
-/// restore is best-effort with verification, user notified on restore
-/// failure"). Also used to preserve a transcript to the clipboard on any
-/// insertion failure (§3.1 failure transitions).
+/// Writes dictation output to the general pasteboard — C1's paste source and
+/// the transcript-preservation fallback on any insertion outcome (§3.1).
+///
+/// The old save/restore snapshot machinery (capture every type of every
+/// pasteboard item, restore after paste) was deleted in the 2026-08 audit:
+/// the refined text deliberately stays on the clipboard after insertion, so
+/// the restore was dead work that also copied arbitrarily large pasteboard
+/// contents (screenshots!) over IPC on the main thread.
 struct ClipboardManager {
-    fileprivate struct SavedItem {
-        let types: [NSPasteboard.PasteboardType]
-        let dataByType: [NSPasteboard.PasteboardType: Data]
-    }
-
     private let pasteboard = NSPasteboard.general
 
-    /// Snapshots every item currently on the pasteboard, across all of its
-    /// declared types, so `restore` can put back exactly what was there.
-    func save() -> ClipboardSnapshot {
-        let items = pasteboard.pasteboardItems ?? []
-        let saved: [SavedItem] = items.map { item in
-            var dataByType: [NSPasteboard.PasteboardType: Data] = [:]
-            for type in item.types {
-                if let data = item.data(forType: type) {
-                    dataByType[type] = data
-                }
-            }
-            return SavedItem(types: item.types, dataByType: dataByType)
-        }
-        return ClipboardSnapshot(items: saved)
-    }
-
-    /// Writes `text` as the sole pasteboard content (used by C1 paste and
-    /// by the transcript-preservation fallback on insertion failure).
+    /// Writes `text` as the sole pasteboard content.
     func setText(_ text: String) {
         pasteboard.clearContents()
         pasteboard.setString(text, forType: .string)
-    }
-
-    /// Restores a prior snapshot. Best-effort: writes back every captured
-    /// type and reports `.failed` (verification) if the write is rejected,
-    /// so the caller can notify the user rather than assume success.
-    @discardableResult
-    func restore(_ snapshot: ClipboardSnapshot) -> RestoreResult {
-        pasteboard.clearContents()
-        guard !snapshot.items.isEmpty else {
-            return .restored
-        }
-
-        let newItems = snapshot.items.map { saved -> NSPasteboardItem in
-            let item = NSPasteboardItem()
-            for type in saved.types {
-                if let data = saved.dataByType[type] {
-                    item.setData(data, forType: type)
-                }
-            }
-            return item
-        }
-        return pasteboard.writeObjects(newItems) ? .restored : .failed
     }
 }

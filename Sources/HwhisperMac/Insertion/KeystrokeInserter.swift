@@ -14,6 +14,12 @@ struct KeystrokeInserter: InsertionStrategy {
         guard let source = CGEventSource(stateID: .hidSystemState) else {
             return .failed("could not create CGEventSource")
         }
+        // TOCTOU re-check immediately before typing (InsertionStrategy
+        // contract) — synthesized keystrokes into a secure field would be
+        // the very leak the guard exists to refuse.
+        guard !SecureInputGuard.isSecureInputActive() else {
+            return .failed("refused: secure input became active before keystrokes")
+        }
 
         for scalar in text.unicodeScalars {
             guard let keyDown = CGEvent(keyboardEventSource: source, virtualKey: 0, keyDown: true),

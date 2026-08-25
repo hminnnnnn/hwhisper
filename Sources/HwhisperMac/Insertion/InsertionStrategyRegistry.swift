@@ -18,12 +18,8 @@ struct InsertionStrategyRegistry {
     ]
 
     private let accessibilityInserter = AccessibilityInserter()
-    private let clipboardInserter: ClipboardPasteInserter
+    private let clipboardInserter = ClipboardPasteInserter()
     private let keystrokeInserter = KeystrokeInserter()
-
-    init(notifier: InsertionNotifier) {
-        self.clipboardInserter = ClipboardPasteInserter(notifier: notifier)
-    }
 
     /// Ordered for the app that will actually receive the text — resolved at
     /// insertion time (`InsertionDestination`), not from the hotkey-down

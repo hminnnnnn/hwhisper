@@ -9,15 +9,16 @@ hwhisper는 두 가지 배포 트랙이 있습니다.
 
 ## 무료 트랙 릴리스 절차 (현재)
 
-```bash
-bash scripts/make-app.sh      # dist/Hwhisper.app (hwhisper-dev self-signed 또는 ad-hoc)
-bash scripts/make-dmg.sh      # dist/hwhisper-<버전>.dmg (hdiutil, 첫 실행 안내 동봉)
-```
+릴리스는 **`bash scripts/release.sh <버전>`** 하나로 시작합니다(개발 저장소에서는 `/hwhisper-release` 스킬이 이 전체 흐름을 수행). 스크립트가 순서대로 처리하는 것:
 
-그 뒤:
-1. GitHub에 저장소를 만들고 push (히스토리에 `.omc/` 없는 상태 — 이미 스쿼시됨).
-2. GitHub Releases에서 새 릴리스(`v0.2.0`) 생성, `dist/hwhisper-0.2.0.dmg`를 아티팩트로 첨부.
-3. 릴리스 노트에 README의 설치 가이드 링크 + 첫 실행 `xattr` 안내를 포함.
+1. **preflight** — 깨끗한 워킹트리, 버전 형식, 산출물 경로 확인 (`--dry-run`으로 여기까지만 확인 가능).
+2. **릴리스 게이트** — `scripts/release-gate.sh`: 정제 회귀 스위트(실 Gemini API, 케이스당 best-of-3 과반) 100% 통과 필수. 실패 시 배포가 차단됩니다.
+3. `scripts/make-app.sh`의 `BUNDLE_VERSION` 반영 → **유니버설(arm64+x86_64)** 앱 빌드 + self-signed 서명 → `scripts/make-dmg.sh`로 `dist/hwhisper-<버전>.dmg` 생성 → 산출물 검증(`lipo -archs` 두 슬라이스 확인 포함) → 문서 버전 동기화.
+
+그 뒤 수동 단계:
+1. `git commit` → `git tag -a v<버전>` → `git push origin main && git push origin v<버전>`.
+2. `gh release create v<버전> dist/hwhisper-<버전>.dmg --title "hwhisper v<버전>" --notes "..."` — 릴리스 노트에 README 설치 가이드 링크 + 첫 실행 `xattr` 안내 포함.
+3. 베타 다운로드 페이지(hwhisper-beta.vercel.app)는 GitHub API에서 최신 릴리스를 스스로 읽으므로 **별도 조치 불필요**.
 
 사용자 경험: 다운로드 → `.dmg` 열기 → 앱을 Applications로 드래그 → `xattr` 1회 → 실행.
 

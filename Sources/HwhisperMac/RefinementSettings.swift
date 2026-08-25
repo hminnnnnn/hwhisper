@@ -18,7 +18,8 @@ enum RefinementSettings {
     // Gemini call crossed 8s and fell back to RAW (unrefined, filler-laden text
     // inserted — real user complaint, confirmed by "…elapsed=8.07s: timedOut"
     // in the log). 20s waits out the slow tail so refinement actually lands;
-    // normal calls are unaffected. Adjustable in Settings.
+    // normal calls are unaffected. (No Settings UI exposes this — the stored
+    // `refinementTimeout` default is only overridable via defaults write.)
     static let defaultTimeout: TimeInterval = 20
 
     static var isEnabled: Bool {
@@ -54,7 +55,7 @@ enum RefinementSettings {
     }
 
     /// Refinement timeout in seconds; falls back to `defaultTimeout` (AC2:
-    /// timeout → raw fallback, default 8s).
+    /// timeout → raw fallback, default 20s).
     static var timeout: TimeInterval {
         get {
             let stored = UserDefaults.standard.double(forKey: timeoutKey)

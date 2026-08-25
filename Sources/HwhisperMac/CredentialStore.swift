@@ -88,7 +88,7 @@ enum CredentialStore {
 
     /// Writes `value` for `account`, replacing any existing entry. Passing
     /// an empty string deletes the stored key instead of storing an empty
-    /// secret (mirrors `KeychainHelper.save`'s contract).
+    /// secret (the contract the legacy Keychain store also had).
     static func save(_ value: String, account: String) {
         guard !value.isEmpty else {
             delete(account: account)

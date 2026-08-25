@@ -2,6 +2,11 @@ import Foundation
 
 /// Plain PCM buffer handed from platform-specific audio capture (HwhisperMac)
 /// into HwhisperCore. Core never manages the audio session itself (§3).
+///
+/// (An `AudioSource` streaming protocol used to live here too; it never
+/// gained a conformer — capture hands Core one finished buffer per
+/// recording — so it was deleted in the 2026-08 audit rather than kept as an
+/// unreachable abstraction.)
 public struct PCMBuffer: Sendable, Equatable {
     public let samples: [Float]
     public let sampleRate: Double
@@ -12,10 +17,4 @@ public struct PCMBuffer: Sendable, Equatable {
         self.sampleRate = sampleRate
         self.channelCount = channelCount
     }
-}
-
-/// Source of PCM buffers. Implemented by platform-specific audio capture
-/// (e.g. HwhisperMac's `AVAudioEngine`-backed capture); consumed by Core.
-public protocol AudioSource: Sendable {
-    func stream() -> AsyncStream<PCMBuffer>
 }

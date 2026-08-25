@@ -1,46 +1,38 @@
 import CoreGraphics
 
-/// C1 (§3 Decision c): clipboard + synthesized ⌘V, with save/restore. The
-/// general-purpose default insertion path — works in effectively any app
-/// that accepts paste, at the cost of a clipboard round-trip.
+/// C1 (§3 Decision c): clipboard + synthesized ⌘V. The general-purpose
+/// default insertion path — works in effectively any app that accepts paste.
+///
+/// No save/restore of the previous clipboard happens here: the refined text
+/// deliberately STAYS on the clipboard after insertion (`TextInserter.
+/// preserveToClipboard`, user request), so the old snapshot→paste→350ms
+/// settle→restore dance restored contents that the very next call clobbered
+/// again. That dead work cost 350ms of pipeline latency per dictation plus a
+/// full multi-type pasteboard copy on the main thread (large with an image
+/// copied) — removed in the 2026-08 audit.
 ///
 /// Verification note: synthesizing ⌘V via `CGEvent.post` requires
 /// Accessibility (and on some configurations, Input Monitoring) permission
 /// for the host process. `CGEvent` creation succeeding does not guarantee
 /// the target app actually received the keystrokes if that permission is
-/// missing — this cannot be exercised end-to-end without granting
-/// Accessibility to this executable, which is out of scope for this pass.
+/// missing.
 struct ClipboardPasteInserter: InsertionStrategy {
     private let clipboard = ClipboardManager()
-    private let notifier: InsertionNotifier
-    /// Time to let the target app process the synthesized paste before
-    /// restoring the clipboard — too short risks racing the paste and
-    /// restoring the clipboard before the target app has actually read from
-    /// it (user feedback #3: paste sometimes silently "doesn't take" in
-    /// real-world apps). 150ms proved too tight in practice; 0.3s is the
-    /// floor the plan calls for.
-    private let pasteSettleNanoseconds: UInt64
-
-    init(notifier: InsertionNotifier, pasteSettleNanoseconds: UInt64 = 350_000_000) {
-        self.notifier = notifier
-        self.pasteSettleNanoseconds = pasteSettleNanoseconds
-    }
 
     func insert(_ text: String, destination: InsertionDestination) async -> InsertionOutcome {
-        let saved = clipboard.save()
+        // TOCTOU re-check (SecureInputGuard's stated contract): the
+        // coordinator's check is already tens of milliseconds stale after AX
+        // destination resolution, and writing the transcript to the shared
+        // pasteboard is itself the leak being refused. The read is a cheap
+        // process-global flag — re-checking costs nothing.
+        guard !SecureInputGuard.isSecureInputActive() else {
+            return .failed("refused: secure input became active before paste")
+        }
         clipboard.setText(text)
 
         guard Self.synthesizePaste() else {
-            clipboard.restore(saved)
             return .failed("could not synthesize ⌘V (Accessibility permission missing?)")
         }
-
-        try? await Task.sleep(nanoseconds: pasteSettleNanoseconds)
-
-        if clipboard.restore(saved) == .failed {
-            notifier.notifyClipboardRestoreFailed()
-        }
-
         return .inserted
     }
 

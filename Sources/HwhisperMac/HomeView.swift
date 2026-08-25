@@ -402,12 +402,25 @@ struct HomeView: View {
         return buckets
     }
 
-    /// "8/9(일)" / "8/9" — 집계 구간과 막대 축 라벨용.
-    static func dayLabel(_ date: Date, weekday: Bool = true) -> String {
+    /// "8/9(일)" / "8/9" — 집계 구간과 막대 축 라벨용. Formatters are cached
+    /// statics (the `HistoryRow.dateFormatter` pattern): `DateFormatter()`
+    /// costs ~0.7–4ms, and this used to be called 9× per body pass (8 trend
+    /// bars + the period caption).
+    private static let dayLabelFormatter: DateFormatter = {
         let formatter = DateFormatter()
         formatter.locale = Locale(identifier: "ko_KR")
-        formatter.dateFormat = weekday ? "M/d(E)" : "M/d"
-        return formatter.string(from: date)
+        formatter.dateFormat = "M/d(E)"
+        return formatter
+    }()
+    private static let dayLabelFormatterNoWeekday: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "ko_KR")
+        formatter.dateFormat = "M/d"
+        return formatter
+    }()
+
+    static func dayLabel(_ date: Date, weekday: Bool = true) -> String {
+        (weekday ? dayLabelFormatter : dayLabelFormatterNoWeekday).string(from: date)
     }
 
     /// 막대 위 라벨 — 폭이 좁아 `formatDuration`보다 더 줄인다.
@@ -418,14 +431,10 @@ struct HomeView: View {
         return "\(minutes / 60)시간\(minutes % 60 > 0 ? "\(minutes % 60)분" : "")"
     }
 
-    /// Human-readable app name for a bundle ID; falls back to the last
-    /// dotted component for apps no longer installed (mirrors the history
-    /// row's resolver).
+    /// Cached — see `AppNameResolver` (calling LaunchServices from `body`
+    /// was a measured multi-ms cost per app per render).
     private static func appName(_ bundleID: String) -> String {
-        if let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleID) {
-            return FileManager.default.displayName(atPath: url.path)
-        }
-        return bundleID.components(separatedBy: ".").last ?? bundleID
+        AppNameResolver.name(for: bundleID)
     }
 
     /// "45초", "12분", "1시간 5분" — 홈 카드용 짧은 한국어 시간 표기.

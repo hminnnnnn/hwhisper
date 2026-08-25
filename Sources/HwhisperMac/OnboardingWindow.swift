@@ -145,7 +145,7 @@ private struct OnboardingPermissionsPage: View {
             Text("권한 허용")
                 .font(.title2.bold())
                 .foregroundStyle(Brand.inkText)
-            Text("딕테이션에는 마이크와 손쉬운 사용 권한이 필요합니다. 지금 허용하지 않아도 나중에 설정에서 다시 할 수 있습니다.")
+            Text("딕테이션에는 마이크와 손쉬운 사용 권한이 필요합니다. 기본 단축키(우측 ⌘ 같은 단일 키)를 쓰려면 입력 모니터링 권한도 필요해요 — 첫 실행 시 요청됩니다. 지금 허용하지 않아도 나중에 설정에서 다시 할 수 있습니다.")
                 .font(.callout)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
@@ -563,8 +563,18 @@ private struct OnboardingRefinementPage: View {
             testState = .failure("엔드포인트 설정 오류")
             return
         }
+        // Same policy gate as the real pipeline (see SettingsWindow's test).
+        if let rejection = RefinerEndpointPolicy.rejectionReason(for: endpointURL) {
+            testState = .failure(rejection)
+            return
+        }
         let key = apiKey
-        let model = provider.defaultModel
+        // The model the app will actually run — `RefinementSettings.model`
+        // falls back to the provider default until the user edits it, but a
+        // stored selection must be what gets validated (this used to
+        // hardcode `provider.defaultModel`, so the test could pass against a
+        // model the user would never use).
+        let model = RefinementSettings.model
         do {
             let config = OpenAICompatibleRefinerConfig(
                 endpoint: endpointURL,
