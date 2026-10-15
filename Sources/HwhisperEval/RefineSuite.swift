@@ -85,6 +85,20 @@ func runRefineSuite() async {
                   check: { (hasNumberedList($0), "list=\(hasNumberedList($0))") }),
         SuiteCase(category: "자기정정", name: "최종 의도만 반영", input: "이번 스프린트에 알림 기능 넣자 아니 아니 다시 말하면 그건 다음으로 미루고 이번엔 검색 개선에 집중하자", style: .structure,
                   check: { ($0.contains("검색") && !$0.contains("알림 기능 넣"), "최종의도(검색) 반영") }),
+        // 정정 제거는 원래 structure만의 계약이었다. 2026-10 base 프롬프트로
+        // 승격(polish 기본 사용자도 받도록) — 아래 2건이 그 계약, 그 뒤 3건은
+        // "아니"가 정정이 아닐 때 내용을 지우지 않는지(오탐 방지)를 잰다.
+        // 실사용 히스토리의 "아니"는 전부 문두 감탄사였으므로 오탐 쪽이 더 중요하다.
+        SuiteCase(category: "자기정정", name: "polish: 시간 번복", input: "내일 미팅 세 시로 잡아 줘 아 아니다 네 시로 해 줘", style: .polish,
+                  check: { (containsAny($0, ["네 시", "4시"]) && !containsAny($0, ["세 시", "3시"]), "최종의도(네 시)만") }),
+        SuiteCase(category: "자기정정", name: "polish: 다시 말하면", input: "이번 배포는 금요일에 하자 아니 다시 말하면 다음 주 월요일로 미루자", style: .polish,
+                  check: { ($0.contains("월요일") && !$0.contains("금요일에 하자"), "최종의도(월요일)만") }),
+        SuiteCase(category: "자기정정:오탐", name: "polish: 문두 '아니'는 정정 아님", input: "아니 근데 이거 왜 자꾸 로그인이 풀리는 거야", style: .polish,
+                  check: { (containsAll($0, ["로그인", "풀리"]) && containsAny($0, ["?", "거야", "건지"]), "내용·질문 보존") }),
+        SuiteCase(category: "자기정정:오탐", name: "polish: 부정 '아니야' 보존", input: "그건 내 의도가 아니야 나는 속도를 먼저 보자는 거였어", style: .polish,
+                  check: { (containsAll($0, ["아니", "의도", "속도"]), "부정 보존") }),
+        SuiteCase(category: "자기정정:오탐", name: "structure: 부정 '아니라' 보존", input: "문제는 서버가 아니라 클라이언트 캐시 쪽이야", style: .structure,
+                  check: { (containsAll($0, ["서버", "아니", "클라이언트"]), "부정 대조 보존") }),
         SuiteCase(category: "KO/EN", name: "영문 용어 보존", input: "그 SQLite FTS5 말고 LIKE 쿼리로 substring 매칭하는 게 낫더라고", style: .polish,
                   check: { (containsAll($0, ["SQLite", "LIKE", "substring"]), "용어 보존") }),
         SuiteCase(category: "안전:답변금지", name: "명령형 안 답함", input: "인공지능이 뭔지 간단하게 설명해 줘", style: .structure,
@@ -146,10 +160,33 @@ func runRefineSuite() async {
     // an LLM at temp 0.2, so a single roll occasionally deviates; a majority
     // vote absorbs that flakiness while still failing on a REAL regression
     // (which fails consistently). Short-circuits once 2 agree.
+    //
+    // API failures are NOT quality votes. The free tier caps
+    // gemini-3.1-flash-lite at 15 requests/minute; firing calls back-to-back
+    // got 429s that the old `try?` counted as "empty output → fail", so a
+    // 31-case run reported 52% with no quality signal at all (2026-10-15).
+    // Calls are now paced under the RPM cap, and a failed call is retried
+    // with backoff before it may count as a vote.
+    let minCallSpacing: TimeInterval = 60.0 / 14.0
+    var lastCallAt = Date.distantPast
+    func paced(_ c: SuiteCase) async -> String {
+        for retry in 0..<4 {
+            let wait = minCallSpacing - Date().timeIntervalSince(lastCallAt)
+            if wait > 0 { try? await Task.sleep(nanoseconds: UInt64(wait * 1e9)) }
+            lastCallAt = Date()
+            if let out = try? await refiner(c.style).refine(c.input, context: RefinementContext()) { return out }
+            if retry < 3 {
+                print("     ⏳ API 호출 실패 — \(20 * (retry + 1))s 후 재시도 (요율 한도 추정)")
+                try? await Task.sleep(nanoseconds: UInt64(20 * (retry + 1)) * 1_000_000_000)
+            }
+        }
+        return ""
+    }
+
     func evaluate(_ c: SuiteCase) async -> (passed: Bool, detail: String, lastOut: String) {
         var pass = 0, lastReason = "", lastOut = ""
         for attempt in 1...3 {
-            let out = (try? await refiner(c.style).refine(c.input, context: RefinementContext())) ?? ""
+            let out = await paced(c)
             let (ok, reason) = out.isEmpty ? (false, "빈 출력/실패") : c.check(out)
             if ok { pass += 1 }
             lastReason = reason; lastOut = out
